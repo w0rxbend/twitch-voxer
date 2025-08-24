@@ -114,7 +114,6 @@ class VoxBot(commands.AutoBot):
 
 
 async def runner():
-
     twitchio.utils.setup_logging(level=logging.INFO)
     at: str = str(os.getenv("TWITCH_ACCESS_TOKEN"))
     rf: str = str(os.getenv("TWITCH_REFRESH_TOKEN"))
@@ -127,7 +126,7 @@ async def runner():
     async with VoxBot(bot_id=bot_id, subs=subs) as bot:
         await bot.add_token(at, rf)
         await bot.start(load_tokens=False)
-    LOGGER.info(f"Can we spawn something here as the another coroutine")
+    LOGGER.info("Can we spawn something here as the another coroutine")
 
 
 def main():
