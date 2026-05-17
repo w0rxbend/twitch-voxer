@@ -1,19 +1,16 @@
 import asyncio
 import logging
 import os
-import random
 import subprocess
-import wave
-from cmd import Cmd
-from queue import Empty
-from typing import TYPE_CHECKING
+
+from dotenv import load_dotenv
 
 import twitchio
-from dotenv import load_dotenv
-from piper import PiperVoice, SynthesisConfig
-from twitchio import ChatMessage, eventsub
+import twitchio.utils
+from twitchio import ChatMessage, Client, eventsub, MultiSubscribePayload
+from twitchio.authentication import UserTokenPayload, ValidateTokenPayload
 from twitchio.ext import commands
-
+from supertonic import TTS
 LOGGER: logging.Logger = logging.getLogger("Bot")
 
 load_dotenv()
@@ -24,12 +21,12 @@ CLIENT_SECRET: str = str(
     os.getenv("TWITCH_CLIENT_SECRET")
 )  # The CLIENT SECRET from the Twitch Dev Console
 
-
-VOICE = PiperVoice.load("./uk_UA-ukrainian_tts-medium.onnx")
+tts = TTS(auto_download=True)
+style = tts.get_voice_style(voice_name="F3")
 
 
 async def get_user_id(username: str):
-    async with twitchio.Client(
+    async with Client(
         client_id=CLIENT_ID, client_secret=CLIENT_SECRET
     ) as client:
         await client.login()
@@ -64,23 +61,18 @@ class VoxBot(commands.AutoBot):
         # LOGGER.info("Subscription established")
         pass
 
-    async def generate_wav(self, text: str):
-        conf = SynthesisConfig(
-            noise_scale=1.0,  # more audio variation
-            noise_w_scale=1.0,  # more speaking variation
-            speaker_id=random.choice([0, 1, 2]),
-        )
-        with wave.open("test.wav", "wb") as wav_file:
-            VOICE.synthesize_wav(text.lower(), wav_file, conf)
-        subprocess.run(["paplay", "test.wav"], capture_output=False)
+    async def generate_wav(self, text: str) -> None:
+        wav, duration = tts.synthesize(text, voice_style=style, lang="uk")
+        tts.save_audio(wav, "output.wav")
+        subprocess.run(["paplay", "output.wav"], capture_output=False)
 
-    async def event_message(self, payload: twitchio.ChatMessage) -> None:
+    async def event_message(self, payload: ChatMessage) -> None:
         LOGGER.info(f"Received Message: {payload.chatter.name} - {payload.text}")
         await self.generate_wav(payload.text)
         await super().event_message(payload)
 
     async def event_oauth_authorized(
-        self, payload: twitchio.authentication.UserTokenPayload
+        self, payload: UserTokenPayload
     ) -> None:
         await self.add_token(payload.access_token, payload.refresh_token)
 
@@ -93,7 +85,7 @@ class VoxBot(commands.AutoBot):
         ]
 
         LOGGER.info("Trying to subscribe..")
-        resp: twitchio.MultiSubscribePayload = await self.multi_subscribe(subs)
+        resp: MultiSubscribePayload = await self.multi_subscribe(subs)
         if resp.errors:
             LOGGER.warning(
                 "Failed to subscribe to: %r, for user: %s", resp.errors, payload.user_id
@@ -101,9 +93,9 @@ class VoxBot(commands.AutoBot):
 
     async def add_token(
         self, token: str, refresh: str
-    ) -> twitchio.authentication.ValidateTokenPayload:
+    ) -> ValidateTokenPayload:
         # Make sure to call super() as it will add the tokens interally and return us some data...
-        resp: twitchio.authentication.ValidateTokenPayload = await super().add_token(
+        resp: ValidateTokenPayload = await super().add_token(
             token, refresh
         )
         LOGGER.info("Added token to the database for user: %s", resp.user_id)
