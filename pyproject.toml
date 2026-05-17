@@ -13,7 +13,6 @@ dependencies = [
     "supertonic>=1.2.3",
     "uvicorn[standard]>=0.47.0",
     "colorlog>=6.10.1",
-    "llm-guard>=0.3.16",
 ]
 
 [project.scripts]

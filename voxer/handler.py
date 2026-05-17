@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pickledb
 from langdetect import detect, LangDetectException
-
 from .tts import TTSService
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
