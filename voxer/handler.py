@@ -90,10 +90,8 @@ class MessageHandler:
         wav_path = self._tts.save_wav(announced, voice_name=voice, lang=lang)
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
         try:
-            await asyncio.gather(
-                self._tts.to_mp3(wav_path, mp3_path),
-                # self._tts.play(wav_path),
-            )
+            await self._tts.to_mp3(wav_path, mp3_path)
+            # await self._tts.play(wav_path)
         finally:
             wav_path.unlink()
 

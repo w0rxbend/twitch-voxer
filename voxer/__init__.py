@@ -2,12 +2,11 @@ import asyncio
 import logging
 from pathlib import Path
 
-import twitchio
 from twitchio import eventsub
 
 from .bot import VoxBot, get_user_id
 from .config import (
-    ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, REFRESH_TOKEN,
+    ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, MESSAGES_PATH, REFRESH_TOKEN,
     SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL,
     SERVER_HOST, SERVER_PORT,
 )
@@ -46,7 +45,7 @@ async def run() -> None:
         await bot.add_token(ACCESS_TOKEN, REFRESH_TOKEN)
         scheduler = Scheduler(
             send_chat=bot.send_chat,
-            handle_message=handler.handle,
+            messages_path=Path(MESSAGES_PATH),
             interval=SCHEDULER_INTERVAL,
             initial_delay=SCHEDULER_INITIAL_DELAY,
         )
