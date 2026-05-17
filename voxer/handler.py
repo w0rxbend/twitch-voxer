@@ -3,6 +3,8 @@ import logging
 import random
 import re
 import uuid
+from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
 
 import pickledb
@@ -181,6 +183,20 @@ _ABBREV_RE_EN: re.Pattern = _build_abbrev_re(_ABBREVS_EN)
 _ABBREV_RE_UK: re.Pattern = _build_abbrev_re(_ABBREVS_UK)
 
 
+class MessageKind(Enum):
+    USER = auto()
+    SYSTEM = auto()
+
+
+@dataclass
+class QueuedMessage:
+    """A message waiting to be spoken via TTS."""
+    username: str
+    text: str
+    kind: MessageKind = field(default=MessageKind.USER)
+
+
+
 def _is_bot(username: str) -> bool:
     lower = username.lower()
     return lower in _KNOWN_BOTS or "bot" in lower
@@ -253,44 +269,51 @@ class MessageHandler:
             LOGGER.debug("Lang detection failed, defaulting to %s", DEFAULT_LANG)
             return DEFAULT_LANG
 
-    async def handle(self, username: str, text: str) -> None:
-        """Process a chat message: detect language, generate TTS, convert to MP3, and broadcast.
+    async def handle(self, message: QueuedMessage) -> None:
+        """Process a queued message via TTS and broadcast to connected clients.
 
-        Skips bot accounts. Detects language, assigns persistent voice, normalises text
-        (URL replacement, abbreviation expansion, laugh tags), synthesises TTS, converts to MP3,
-        and broadcasts audio to connected WebSocket clients.
+        Dispatches on message.kind:
+          - USER: applies bot filtering, language detection, persistent voice assignment,
+            text normalisation, and the "username says:" announcement prefix.
+          - SYSTEM: speaks text directly with a random voice in Ukrainian — used for
+            channel events (follow, sub, raid, cheer, etc.).
 
         Args:
-            username: Twitch username of the chatter.
-            text: Raw chat message text.
+            message: The queued message to process.
         """
-        if _is_bot(username):
-            LOGGER.info("Skipping bot account: %s", username)
-            return
-
-        LOGGER.info("Handling message from %s", username)
-        lang = await self._detect_lang(text)
-        voice = await self._get_or_assign_voice(username)
-        announced = _ANNOUNCEMENTS[lang].format(username=username, text=_normalize(text, lang))
+        if message.kind is MessageKind.SYSTEM:
+            LOGGER.info("Announcing system event for %s", message.username)
+            voice = random.choice(VOICES)
+            announced = message.text
+            lang = "uk"
+        else:
+            if _is_bot(message.username):
+                LOGGER.info("Skipping bot account: %s", message.username)
+                return
+            LOGGER.info("Handling message from %s", message.username)
+            lang = await self._detect_lang(message.text)
+            voice = await self._get_or_assign_voice(message.username)
+            announced = _ANNOUNCEMENTS[lang].format(
+                username=message.username, text=_normalize(message.text, lang)
+            )
 
         wav_path = self._tts.save_wav(announced, voice_name=voice, lang=lang)
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
         try:
             await self._tts.to_mp3(wav_path, mp3_path)
-            # await self._tts.play(wav_path)
         finally:
             wav_path.unlink()
 
-        LOGGER.info("Broadcasting audio for %s -> %s", username, mp3_path.name)
-        await self._broadcast(url=f"/audio/{mp3_path.name}", username=username)
+        LOGGER.info("Broadcasting audio for %s -> %s", message.username, mp3_path.name)
+        await self._broadcast(url=f"/audio/{mp3_path.name}", username=message.username)
 
     async def process_queue(self) -> None:
-        """Continuously drain the message queue, invoking handle() for each (username, text) pair."""
+        """Continuously drain the message queue, invoking handle() for each QueuedMessage."""
         while True:
             try:
-                username, text = await self._message_queue.get()
-                LOGGER.debug("Processing queued message from %s", username)
-                await self.handle(username, text)
+                msg: QueuedMessage = await self._message_queue.get()
+                LOGGER.debug("Processing queued message from %s (%s)", msg.username, msg.kind.name)
+                await self.handle(msg)
             except Exception as exc:
                 LOGGER.error("Error processing message: %s", exc)
             finally:

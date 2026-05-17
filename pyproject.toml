@@ -13,7 +13,20 @@ dependencies = [
     "supertonic>=1.2.3",
     "uvicorn[standard]>=0.47.0",
     "colorlog>=6.10.1",
+    "llm-guard>=0.3.16",
 ]
 
 [project.scripts]
 twitch-voxer = "voxer:main"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.13",
+]
