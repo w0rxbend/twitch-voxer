@@ -16,6 +16,13 @@ _STATIC_DIR = Path(__file__).parent / "static"
 
 class AudioServer:
     def __init__(self, audio_dir: Path, host: str, port: int) -> None:
+        """Initialize the audio server with directory and network settings.
+
+        Args:
+            audio_dir: Directory from which MP3 files are served and cleaned up.
+            host: Host address to bind the HTTP/WebSocket server.
+            port: TCP port to listen on.
+        """
         self._audio_dir = audio_dir
         self._host = host
         self._port = port
@@ -61,6 +68,12 @@ class AudioServer:
         ])
 
     async def broadcast(self, url: str, username: str) -> None:
+        """Send an audio event to all connected WebSocket clients.
+
+        Args:
+            url: Relative URL of the MP3 file to play (e.g. "/audio/<uuid>.mp3").
+            username: Twitch username associated with the audio clip.
+        """
         if not self._clients:
             LOGGER.debug("No WS clients connected, skipping broadcast")
             return
@@ -77,6 +90,7 @@ class AudioServer:
         self._clients -= dead
 
     async def serve(self) -> None:
+        """Start the uvicorn server and block until shutdown."""
         config = uvicorn.Config(
             self._app,
             host=self._host,

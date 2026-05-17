@@ -214,6 +214,15 @@ class MessageHandler:
         broadcast,
         message_queue: asyncio.Queue,
     ) -> None:
+        """Initialize message handler with TTS service and database.
+
+        Args:
+            tts: TTSService instance for voice synthesis.
+            db_path: Path to pickledb file storing username → voice assignments.
+            audio_dir: Directory for storing generated MP3 files.
+            broadcast: Async function to broadcast audio via WebSocket to connected clients.
+            message_queue: asyncio.Queue for receiving messages from the bot.
+        """
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
         self._db = pickledb.PickleDB(db_path)
@@ -245,6 +254,16 @@ class MessageHandler:
             return DEFAULT_LANG
 
     async def handle(self, username: str, text: str) -> None:
+        """Process a chat message: detect language, generate TTS, convert to MP3, and broadcast.
+
+        Skips bot accounts. Detects language, assigns persistent voice, normalises text
+        (URL replacement, abbreviation expansion, laugh tags), synthesises TTS, converts to MP3,
+        and broadcasts audio to connected WebSocket clients.
+
+        Args:
+            username: Twitch username of the chatter.
+            text: Raw chat message text.
+        """
         if _is_bot(username):
             LOGGER.info("Skipping bot account: %s", username)
             return
@@ -265,7 +284,8 @@ class MessageHandler:
         LOGGER.info("Broadcasting audio for %s -> %s", username, mp3_path.name)
         await self._broadcast(url=f"/audio/{mp3_path.name}", username=username)
 
-    async def _process_queue(self) -> None:
+    async def process_queue(self) -> None:
+        """Continuously drain the message queue, invoking handle() for each (username, text) pair."""
         while True:
             try:
                 username, text = await self._message_queue.get()

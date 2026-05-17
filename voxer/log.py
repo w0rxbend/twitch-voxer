@@ -4,6 +4,13 @@ import colorlog
 
 
 def setup_logging(level: int = logging.DEBUG) -> None:
+    """Configure coloured logging with timestamp and module names.
+
+    Quiets noisy third-party loggers (websockets, uvicorn, asyncio).
+
+    Args:
+        level: Log level (default: DEBUG).
+    """
     fmt = colorlog.ColoredFormatter(
         "%(log_color)s%(asctime)s  %(levelname)-8s%(reset)s  "
         "%(cyan)s%(name)-30s%(reset)s %(message)s",

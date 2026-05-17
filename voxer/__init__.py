@@ -20,6 +20,11 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 async def run() -> None:
+    """Initialize and start the Twitch TTS bot with all components.
+
+    Wires together: TTS service, audio server, message handler, Twitch bot, and scheduler.
+    Runs bot, server, scheduler, and message handler in concurrent tasks via asyncio.gather().
+    """
     setup_logging()
 
     audio_dir = Path(AUDIO_DIR)
@@ -56,9 +61,10 @@ async def run() -> None:
             bot.start(load_tokens=False),
             server.serve(),
             scheduler.run(),
-            handler._process_queue(),
+            handler.process_queue(),
         )
 
 
 def main() -> None:
+    """Entry point: run the async event loop."""
     asyncio.run(run())

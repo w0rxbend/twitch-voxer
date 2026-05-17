@@ -16,6 +16,14 @@ class Scheduler:
         interval: int = 600,
         initial_delay: int = 10,
     ) -> None:
+        """Initialize the scheduler with a chat callback and message database.
+
+        Args:
+            send_chat: Async callable that posts a message to Twitch chat.
+            messages_path: Path to pickledb file containing the scheduled messages list.
+            interval: Seconds between scheduled messages (default: 600).
+            initial_delay: Seconds to wait before the first message (default: 10).
+        """
         self._send_chat = send_chat
         self._db = pickledb.PickleDB(str(messages_path))
         self._interval = interval
@@ -35,6 +43,7 @@ class Scheduler:
             return []
 
     async def run(self) -> None:
+        """Continuously post scheduled messages to chat at the configured interval."""
         LOGGER.info(
             "Scheduler ready — first message in %ds, then every %ds",
             self._initial_delay,
