@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 160" width="480" height="160">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a0533"/>
+      <stop offset="100%" style="stop-color:#0d001f"/>
+    </linearGradient>
+    <linearGradient id="purple" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#bf94ff"/>
+      <stop offset="100%" style="stop-color:#9146ff"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="480" height="160" rx="16" fill="url(#bg)"/>
+
+  <!-- Mic body -->
+  <rect x="34" y="38" width="28" height="44" rx="14" fill="url(#purple)" filter="url(#glow)"/>
+  <!-- Mic stand arc -->
+  <path d="M26 76 Q26 104 48 104 Q70 104 70 76" fill="none" stroke="#9146ff" stroke-width="4" stroke-linecap="round"/>
+  <!-- Mic stand pole -->
+  <line x1="48" y1="104" x2="48" y2="118" stroke="#9146ff" stroke-width="4" stroke-linecap="round"/>
+  <!-- Mic stand base -->
+  <line x1="36" y1="118" x2="60" y2="118" stroke="#9146ff" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- Sound waves (right of mic) -->
+  <g filter="url(#glow)" opacity="0.9">
+    <path d="M78 68 Q86 80 78 92" fill="none" stroke="#bf94ff" stroke-width="3.5" stroke-linecap="round"/>
+    <path d="M88 60 Q100 80 88 100" fill="none" stroke="#9146ff" stroke-width="3" stroke-linecap="round"/>
+    <path d="M98 52 Q114 80 98 108" fill="none" stroke="#7b2fff" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="128" y="106"
+        font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+        font-size="64"
+        font-weight="700"
+        letter-spacing="-1"
+        fill="url(#purple)"
+        filter="url(#glow)">voxer</text>
+
+  <!-- Twitch-style accent bar under text -->
+  <rect x="128" y="114" width="320" height="4" rx="2" fill="#9146ff" opacity="0.5"/>
+
+  <!-- Small tagline -->
+  <text x="130" y="138"
+        font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
+        font-size="15"
+        font-weight="400"
+        letter-spacing="2"
+        fill="#bf94ff"
+        opacity="0.75">TWITCH  CHAT  TTS</text>
+</svg>
