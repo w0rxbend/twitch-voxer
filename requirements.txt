@@ -68,6 +68,6 @@ twitchio==3.1.0
 typing_extensions==4.14.1
 urllib3 @ file:///home/conda/feedstock_root/build_artifacts/urllib3_1750271362675/work
 uvicorn==0.35.0
-wheel==0.45.1
+wheel==0.46.2
 yarl==1.20.1
 zstandard==0.23.0
