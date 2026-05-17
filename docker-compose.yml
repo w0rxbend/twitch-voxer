@@ -1,0 +1,18 @@
+services:
+  voxer:
+    build: .
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      VOXER_DB_PATH: /data/voices.json
+      VOXER_AUDIO_DIR: /data/audio
+      VOXER_SERVER_HOST: "0.0.0.0"
+      VOXER_SERVER_PORT: "8080"
+    volumes:
+      - ./data:/data
+      - tts-cache:/root/.cache
+    restart: unless-stopped
+
+volumes:
+  tts-cache:

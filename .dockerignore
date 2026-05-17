@@ -1,0 +1,11 @@
+.venv/
+.git/
+.env
+data/
+audio/
+voices.json
+*.wav
+*.mp3
+__pycache__/
+*.py[oc]
+.python-version

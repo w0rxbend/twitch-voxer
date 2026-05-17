@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { background: transparent; margin: 0; overflow: hidden; }
+  </style>
+</head>
+<body>
+<script>
+  const RECONNECT_BASE_MS = 1000;
+  const RECONNECT_MAX_MS = 30000;
+
+  const queue = [];
+  let isPlaying = false;
+  let ws = null;
+  let reconnectDelay = RECONNECT_BASE_MS;
+
+  function notifyDone(url) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ done: url.split("/").pop() }));
+    }
+  }
+
+  function playNext() {
+    if (isPlaying || queue.length === 0) return;
+    const { url, username } = queue.shift();
+    isPlaying = true;
+    const fullUrl = location.origin + url;
+    console.log(`[${username}] ${fullUrl}`);
+    const audio = new Audio(fullUrl);
+    audio.onended = () => { notifyDone(url); isPlaying = false; playNext(); };
+    audio.onerror = () => {
+      console.error(`Failed to play: ${fullUrl}`);
+      notifyDone(url);
+      isPlaying = false;
+      playNext();
+    };
+    audio.play();
+  }
+
+  function connect() {
+    ws = new WebSocket(`ws://${location.host}/ws`);
+
+    ws.onopen = () => {
+      console.log("voxer connected");
+      reconnectDelay = RECONNECT_BASE_MS;
+    };
+
+    ws.onclose = () => {
+      console.warn(`voxer disconnected, reconnecting in ${reconnectDelay}ms`);
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+    };
+
+    ws.onerror = (err) => {
+      console.error("voxer error:", err);
+      ws.close();
+    };
+
+    ws.onmessage = (event) => {
+      queue.push(JSON.parse(event.data));
+      playNext();
+    };
+  }
+
+  connect();
+</script>
+</body>
+</html>

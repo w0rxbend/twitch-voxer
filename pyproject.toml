@@ -8,7 +8,12 @@ dependencies = [
     "langdetect>=1.0.9",
     "pickledb>=1.3.2",
     "python-dotenv>=1.1.1",
-    "starlette>=0.47.2",
-    "twitchio>=3.1.0",
+    "starlette>=1.0.0",
+    "twitchio>=3.2.2",
     "supertonic>=1.2.3",
+    "uvicorn[standard]>=0.47.0",
+    "colorlog>=6.10.1",
 ]
+
+[project.scripts]
+twitch-voxer = "voxer:main"
