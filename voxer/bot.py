@@ -67,6 +67,6 @@ class VoxBot(commands.AutoBot):
         LOGGER.info("Sending to chat: %r", text)
         pu = self.create_partialuser(self.bot_id)
         await pu.send_message(sender=self.bot_id, message=text)
-        
+
     async def event_ready(self) -> None:
         LOGGER.info("Successfully logged in as: %s", self.bot_id)
