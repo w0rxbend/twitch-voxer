@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from twitchio import ChatMessage, Client, eventsub, MultiSubscribePayload
@@ -26,8 +27,10 @@ class VoxBot(commands.AutoBot):
         bot_id: str,
         subs: list[eventsub.SubscriptionPayload],
         handler: MessageHandler,
+        message_queue: asyncio.Queue,
     ) -> None:
         self._handler = handler
+        self._message_queue = message_queue
         super().__init__(
             client_id=CLIENT_ID,
             client_secret=CLIENT_SECRET,
@@ -40,7 +43,8 @@ class VoxBot(commands.AutoBot):
 
     async def event_message(self, payload: ChatMessage) -> None:
         LOGGER.info("Received message: %s — %s", payload.chatter.name, payload.text)
-        await self._handler.handle(payload.chatter.name, payload.text)
+        await self._message_queue.put((payload.chatter.name, payload.text))
+        LOGGER.debug("Queued message from %s", payload.chatter.name)
         await super().event_message(payload)
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:

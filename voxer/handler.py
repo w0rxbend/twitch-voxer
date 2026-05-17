@@ -212,12 +212,14 @@ class MessageHandler:
         db_path: str,
         audio_dir: Path,
         broadcast,
+        message_queue: asyncio.Queue,
     ) -> None:
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
         self._db = pickledb.PickleDB(db_path)
         self._audio_dir = audio_dir
         self._broadcast = broadcast
+        self._message_queue = message_queue
         LOGGER.info("MessageHandler ready")
 
     async def _get_or_assign_voice(self, username: str) -> str:
@@ -262,3 +264,14 @@ class MessageHandler:
 
         LOGGER.info("Broadcasting audio for %s -> %s", username, mp3_path.name)
         await self._broadcast(url=f"/audio/{mp3_path.name}", username=username)
+
+    async def _process_queue(self) -> None:
+        while True:
+            try:
+                username, text = await self._message_queue.get()
+                LOGGER.debug("Processing queued message from %s", username)
+                await self.handle(username, text)
+            except Exception as exc:
+                LOGGER.error("Error processing message: %s", exc)
+            finally:
+                self._message_queue.task_done()

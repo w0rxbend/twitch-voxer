@@ -26,6 +26,8 @@ async def run() -> None:
     audio_dir.mkdir(exist_ok=True)
     LOGGER.info("Audio dir: %s", audio_dir.resolve())
 
+    message_queue: asyncio.Queue = asyncio.Queue()
+
     tts = TTSService()
     server = AudioServer(audio_dir=audio_dir, host=SERVER_HOST, port=SERVER_PORT)
     handler = MessageHandler(
@@ -33,6 +35,7 @@ async def run() -> None:
         db_path=DB_PATH,
         audio_dir=audio_dir,
         broadcast=server.broadcast,
+        message_queue=message_queue,
     )
 
     bot_id = await get_user_id(BOT_USERNAME)
@@ -41,7 +44,7 @@ async def run() -> None:
     ]
     LOGGER.info("Bot user ID: %s", bot_id)
 
-    async with VoxBot(bot_id=bot_id, subs=subs, handler=handler) as bot:
+    async with VoxBot(bot_id=bot_id, subs=subs, handler=handler, message_queue=message_queue) as bot:
         await bot.add_token(ACCESS_TOKEN, REFRESH_TOKEN)
         scheduler = Scheduler(
             send_chat=bot.send_chat,
@@ -53,6 +56,7 @@ async def run() -> None:
             bot.start(load_tokens=False),
             server.serve(),
             scheduler.run(),
+            handler._process_queue(),
         )
 
 
