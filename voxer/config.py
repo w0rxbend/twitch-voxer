@@ -18,3 +18,11 @@ SCHEDULER_INITIAL_DELAY: int = int(os.getenv("VOXER_SCHEDULER_INITIAL_DELAY", "1
 MESSAGES_PATH: str = str(os.getenv("VOXER_MESSAGES_PATH", "messages.json"))
 VOICES_DIR: str = str(os.getenv("VOXER_VOICES_DIR", "voices"))
 EMOTES_DB_PATH: str = str(os.getenv("VOXER_EMOTES_DB_PATH", "emotes/emotes.db"))
+EMOTE_SOUND_PATHS: list[str] = [
+    p.strip()
+    for p in os.getenv(
+        "VOXER_EMOTE_SOUND_PATHS",
+        "emotes/slack-message.mp3,emotes/discord.mp3",
+    ).split(",")
+    if p.strip()
+]

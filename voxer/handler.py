@@ -2,6 +2,7 @@ import asyncio
 import logging
 import random
 import re
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -259,6 +260,7 @@ class MessageHandler:
         broadcast,
         message_queue: asyncio.Queue,
         emotes_db_path: str | None = None,
+        emote_sound_paths: list[str] | None = None,
     ) -> None:
         """Initialize message handler with TTS service and database.
 
@@ -269,6 +271,7 @@ class MessageHandler:
             broadcast: Async function to broadcast audio via WebSocket to connected clients.
             message_queue: asyncio.Queue for receiving messages from the bot.
             emotes_db_path: Optional path to pickledb file storing emote name → image URLs.
+            emote_sound_paths: MP3 files to pick from randomly for emote-only messages.
         """
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
@@ -279,6 +282,9 @@ class MessageHandler:
         self._broadcast = broadcast
         self._message_queue = message_queue
         self._emotes: dict[str, dict] = self._load_emotes(emotes_db_path)
+        self._emote_sounds: list[Path] = [
+            p for raw in (emote_sound_paths or []) if (p := Path(raw)).exists()
+        ]
         LOGGER.info("MessageHandler ready")
 
     @staticmethod
@@ -333,7 +339,7 @@ class MessageHandler:
         if message.kind is MessageKind.SYSTEM:
             LOGGER.info("Announcing system event for %s", message.username)
             voice = random.choice(self._voices)
-            announced = message.text
+            final_text = message.text
             lang = "uk"
         else:
             if _is_bot(message.username):
@@ -341,9 +347,31 @@ class MessageHandler:
                 return
             LOGGER.info("Handling message from %s", message.username)
             clean_text, emoji_items = _extract_emojis(message.text)
-            lang = await self._detect_lang(clean_text or message.text)
+
+            if not clean_text.strip():
+                twitch_emote_items = [
+                    EmoteItem(name=name, url=self._emotes[name]["url_2x"])
+                    for name in message.emote_names
+                    if name in self._emotes
+                ]
+                all_emotes = twitch_emote_items + emoji_items
+                if all_emotes and self._emote_sounds:
+                    sound = random.choice(self._emote_sounds)
+                    LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
+                    mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
+                    shutil.copy2(sound, mp3_path)
+                    await self._broadcast(BroadcastEvent(
+                        audio_url=f"/audio/{mp3_path.name}",
+                        username=message.username,
+                        emotes=all_emotes,
+                    ))
+                else:
+                    LOGGER.info("Skipping emote-only from %s", message.username)
+                return
+
+            lang = await self._detect_lang(clean_text)
             voice = await self._get_or_assign_voice(message.username)
-            announced = _ANNOUNCEMENTS[lang].format(
+            final_text = _ANNOUNCEMENTS[lang].format(
                 username=message.username, text=_normalize(clean_text, lang)
             )
 
@@ -354,7 +382,7 @@ class MessageHandler:
         ]
         all_emotes = twitch_emote_items + emoji_items
 
-        wav_path = self._tts.save_wav(announced, voice_name=voice, lang=lang)
+        wav_path = self._tts.save_wav(final_text, voice_name=voice, lang=lang)
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
         try:
             await self._tts.to_mp3(wav_path, mp3_path)
