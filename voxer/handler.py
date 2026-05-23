@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 
+import emoji as emoji_lib
 import pickledb
 from langdetect import detect, LangDetectException
 from .tts import TTSService
@@ -182,6 +183,34 @@ _ABBREV_RE_EN: re.Pattern = _build_abbrev_re(_ABBREVS_EN)
 _ABBREV_RE_UK: re.Pattern = _build_abbrev_re(_ABBREVS_UK)
 
 
+_TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72"
+
+
+def _emoji_url(char: str) -> str:
+    codepoints = "-".join(f"{ord(c):x}" for c in char if ord(c) != 0xFE0F)
+    return f"{_TWEMOJI_BASE}/{codepoints}.png"
+
+
+def _extract_emojis(text: str) -> tuple[str, list["EmoteItem"]]:
+    found = emoji_lib.emoji_list(text)
+    items = [EmoteItem(name=e["emoji"], url=_emoji_url(e["emoji"])) for e in found]
+    clean = emoji_lib.replace_emoji(text, replace="").strip()
+    return clean, items
+
+
+@dataclass
+class EmoteItem:
+    name: str
+    url: str
+
+
+@dataclass
+class BroadcastEvent:
+    audio_url: str
+    username: str
+    emotes: list[EmoteItem] = field(default_factory=list)
+
+
 class MessageKind(Enum):
     USER = auto()
     SYSTEM = auto()
@@ -299,6 +328,8 @@ class MessageHandler:
         Args:
             message: The queued message to process.
         """
+        emoji_items: list[EmoteItem] = []
+
         if message.kind is MessageKind.SYSTEM:
             LOGGER.info("Announcing system event for %s", message.username)
             voice = random.choice(self._voices)
@@ -309,17 +340,19 @@ class MessageHandler:
                 LOGGER.info("Skipping bot account: %s", message.username)
                 return
             LOGGER.info("Handling message from %s", message.username)
-            lang = await self._detect_lang(message.text)
+            clean_text, emoji_items = _extract_emojis(message.text)
+            lang = await self._detect_lang(clean_text or message.text)
             voice = await self._get_or_assign_voice(message.username)
             announced = _ANNOUNCEMENTS[lang].format(
-                username=message.username, text=_normalize(message.text, lang)
+                username=message.username, text=_normalize(clean_text, lang)
             )
 
-        emotes = [
-            {"name": name, **self._emotes[name]}
+        twitch_emote_items = [
+            EmoteItem(name=name, url=self._emotes[name]["url_2x"])
             for name in message.emote_names
             if name in self._emotes
         ]
+        all_emotes = twitch_emote_items + emoji_items
 
         wav_path = self._tts.save_wav(announced, voice_name=voice, lang=lang)
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
@@ -328,8 +361,13 @@ class MessageHandler:
         finally:
             wav_path.unlink()
 
-        LOGGER.info("Broadcasting audio for %s -> %s (emotes: %s)", message.username, mp3_path.name, [e["name"] for e in emotes])
-        await self._broadcast(url=f"/audio/{mp3_path.name}", username=message.username, emotes=emotes)
+        event = BroadcastEvent(
+            audio_url=f"/audio/{mp3_path.name}",
+            username=message.username,
+            emotes=all_emotes,
+        )
+        LOGGER.info("Broadcasting audio for %s -> %s (emotes: %s)", message.username, mp3_path.name, [e.name for e in all_emotes])
+        await self._broadcast(event)
 
     async def process_queue(self) -> None:
         """Continuously drain the message queue, invoking handle() for each QueuedMessage."""

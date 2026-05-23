@@ -451,7 +451,7 @@
       const burst = visualState.burst;
 
       speakerRig.visible = visualState.active || burst > 0.02;
-      speakerRig.rotation.y = Math.sin(seconds * 1.3) * 0.08;
+      speakerRig.rotation.y = Math.sin(seconds * 0.72) * 0.28;
       speakerRig.rotation.x = Math.sin(seconds * 1.7) * 0.05 + pulse * 0.04;
       speakerRig.rotation.z = Math.sin(seconds * 2.1) * 0.025;
       speakerRig.scale.setScalar(1 + pulse * 0.22 + burst * 0.12);
@@ -620,7 +620,7 @@
 
       const img = new Image();
       img.className = "emote-particle";
-      img.src = emote.url_2x;
+      img.src = emote.url;
       img.alt = emote.name;
       img.style.cssText = [
         `left:${startX - size / 2}px`,
@@ -694,9 +694,9 @@
 
   function playNext() {
     if (isPlaying || queue.length === 0) return;
-    const { url, username, emotes } = queue.shift();
+    const { audio_url, username, emotes } = queue.shift();
     isPlaying = true;
-    const fullUrl = location.origin + url;
+    const fullUrl = location.origin + audio_url;
     console.log(`[${username}] ${fullUrl}`, emotes?.map(e => e.name));
     showSpeaker(username, emotes);
 
@@ -704,7 +704,7 @@
     connectAudioReactivity(audio);
 
     audio.onended = () => {
-      notifyDone(url);
+      notifyDone(audio_url);
       isPlaying = false;
       hideSpeaker();
       playNext();
@@ -712,7 +712,7 @@
 
     audio.onerror = () => {
       console.error(`Failed to play: ${fullUrl}`);
-      notifyDone(url);
+      notifyDone(audio_url);
       isPlaying = false;
       hideSpeaker();
       playNext();
@@ -720,7 +720,7 @@
 
     audio.play().catch((error) => {
       console.error("Playback failed:", error);
-      notifyDone(url);
+      notifyDone(audio_url);
       isPlaying = false;
       hideSpeaker();
       playNext();

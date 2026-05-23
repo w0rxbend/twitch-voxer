@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: transparent;
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    }
+
+    /* ── Fire particles ── */
+    .fp {
+      position: fixed;
+      pointer-events: none;
+      object-fit: contain;
+      image-rendering: auto;
+      transform-origin: center center;
+      will-change: transform, opacity;
+      animation: fp-rise var(--dur) var(--ease) var(--delay) forwards;
+    }
+
+    /*
+      Flame flicker: particle travels (--dx, --dy) while drifting laterally
+      via --w at different phases, mimicking a real flame's S-shaped path.
+    */
+    @keyframes fp-rise {
+      0% {
+        opacity: 0;
+        transform: translate(0, 0) scale(0.18) rotate(var(--r0));
+      }
+      9% {
+        opacity: 1;
+        transform: translate(calc(var(--dx)*0.06 + var(--w)), calc(var(--dy)*0.06))
+                   scale(0.82) rotate(calc(var(--r0)*0.6));
+      }
+      32% {
+        opacity: 0.92;
+        transform: translate(calc(var(--dx)*0.28 - var(--w)*0.8), calc(var(--dy)*0.28))
+                   scale(1.12) rotate(calc(var(--r0)*-0.1));
+      }
+      58% {
+        opacity: 0.78;
+        transform: translate(calc(var(--dx)*0.54 + var(--w)*0.5), calc(var(--dy)*0.54))
+                   scale(0.92) rotate(calc(var(--r1)*0.4));
+      }
+      80% {
+        opacity: 0.34;
+        transform: translate(calc(var(--dx)*0.80 - var(--w)*0.15), calc(var(--dy)*0.80))
+                   scale(0.58) rotate(var(--r1));
+      }
+      100% {
+        opacity: 0;
+        transform: translate(var(--dx), var(--dy)) scale(0.2) rotate(var(--r1));
+      }
+    }
+
+    /* ── Username badge ── */
+    #np-badge {
+      position: fixed;
+      bottom: 26px;
+      left: 50%;
+      transform: translateX(-50%) translateY(10px) scale(0.96);
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 18px 7px 12px;
+      background:
+        linear-gradient(135deg, rgba(11, 18, 26, 0.86), rgba(18, 14, 28, 0.80)),
+        linear-gradient(90deg, rgba(85, 230, 255, 0.22), rgba(255, 79, 216, 0.16));
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 999px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.38), 0 0 24px rgba(85, 230, 255, 0.15);
+      color: #fff;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 240ms ease, transform 300ms cubic-bezier(0.2, 0.9, 0.2, 1);
+      z-index: 50;
+    }
+
+    #np-badge.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0) scale(1);
+    }
+
+    #np-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #55e6ff;
+      box-shadow: 0 0 8px #55e6ff;
+      flex-shrink: 0;
+    }
+
+    #np-badge.visible #np-dot {
+      animation: dot-pulse 640ms ease-in-out infinite alternate;
+    }
+
+    @keyframes dot-pulse {
+      from { transform: scale(0.72); opacity: 0.62; box-shadow: 0 0 5px #55e6ff; }
+      to   { transform: scale(1.42); opacity: 1;    box-shadow: 0 0 18px #55e6ff; }
+    }
+
+    #np-name {
+      font-size: 17px;
+      font-weight: 740;
+      line-height: 1;
+      text-shadow: 0 1px 8px rgba(0, 0, 0, 0.72);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
+    }
+  </style>
+</head>
+<body>
+
+<div id="np-badge">
+  <span id="np-dot"></span>
+  <span id="np-name"></span>
+</div>
+
+<script>
+  const RECONNECT_BASE_MS = 1000;
+  const RECONNECT_MAX_MS = 30000;
+
+  const queue = [];
+  let isPlaying = false;
+  let ws = null;
+  let reconnectDelay = RECONNECT_BASE_MS;
+  let spawnTimer = null;
+  let activeEmotes = [];
+
+  const npBadge = document.getElementById("np-badge");
+  const npName  = document.getElementById("np-name");
+
+  const EASES = [
+    "cubic-bezier(0.10, 0.82, 0.28, 1)",
+    "cubic-bezier(0.16, 0.74, 0.30, 1)",
+    "cubic-bezier(0.08, 0.88, 0.22, 1)",
+  ];
+
+  /*
+    Four corner fire streams.
+    dx/dy are signed ranges [min, max] describing total particle travel.
+    Bottom corners: dy is negative (fire rises up).
+    Top corners:    dy is positive (fire falls inward).
+    Lateral (dx) nudges particles away from the wall.
+  */
+  const CORNERS = [
+    { sxR: [0,   90],  syR: (ih) => [ih - 90, ih],  dxR: [ 40,  200], dyR: [-260, -480] }, // BL ↑→
+    { sxR: (iw) => [iw - 90, iw], syR: (ih) => [ih - 90, ih], dxR: [-40, -200], dyR: [-260, -480] }, // BR ↑←
+    { sxR: [0,   90],  syR: [0, 90], dxR: [ 40,  200], dyR: [ 260,  480] }, // TL ↓→
+    { sxR: (iw) => [iw - 90, iw], syR: [0, 90], dxR: [-40, -200], dyR: [ 260,  480] }, // TR ↓←
+  ];
+
+  function rRange(range, ...args) {
+    const r = typeof range === "function" ? range(...args) : range;
+    return r[0] + Math.random() * (r[1] - r[0]);
+  }
+
+  function spawnParticle(ci) {
+    if (!activeEmotes.length) return;
+
+    const iw = window.innerWidth;
+    const ih = window.innerHeight;
+    const c  = CORNERS[ci];
+
+    const emote  = activeEmotes[Math.floor(Math.random() * activeEmotes.length)];
+    const size   = 22 + Math.random() * 24;
+    const startX = rRange(c.sxR, iw);
+    const startY = rRange(c.syR, ih);
+    const dx     = rRange(c.dxR);
+    const dy     = rRange(c.dyR);
+    const wave   = (Math.random() - 0.5) * 88;   // lateral flame flicker
+    const dur    = 1300 + Math.random() * 1400;
+    const delay  = Math.random() * 160;
+    const r0     = (Math.random() - 0.5) * 44;
+    const r1     = r0 + (Math.random() - 0.5) * 90;
+    const ease   = EASES[Math.floor(Math.random() * EASES.length)];
+
+    const img = new Image();
+    img.className = "fp";
+    img.src = emote.url;
+    img.alt = emote.name;
+    img.style.cssText = [
+      `left:${(startX - size / 2).toFixed(1)}px`,
+      `top:${(startY  - size / 2).toFixed(1)}px`,
+      `width:${size.toFixed(1)}px`,
+      `height:${size.toFixed(1)}px`,
+      `--dx:${dx.toFixed(1)}px`,
+      `--dy:${dy.toFixed(1)}px`,
+      `--w:${wave.toFixed(1)}px`,
+      `--dur:${Math.round(dur)}ms`,
+      `--delay:${Math.round(delay)}ms`,
+      `--ease:${ease}`,
+      `--r0:${r0.toFixed(1)}deg`,
+      `--r1:${r1.toFixed(1)}deg`,
+    ].join(";");
+
+    document.body.appendChild(img);
+    img.addEventListener("animationend", () => img.remove(), { once: true });
+  }
+
+  function startFire(emotes) {
+    stopFire();
+    activeEmotes = emotes;
+
+    // Initial burst: staggered wave of particles from all corners
+    for (let ci = 0; ci < 4; ci++) {
+      for (let i = 0; i < 16; i++) {
+        setTimeout(() => spawnParticle(ci), i * 48);
+      }
+    }
+
+    // Continuous stream: ~40 particles/sec total
+    spawnTimer = setInterval(() => {
+      for (let ci = 0; ci < 4; ci++) {
+        spawnParticle(ci);
+        if (Math.random() < 0.55) spawnParticle(ci); // density burst
+      }
+    }, 100);
+  }
+
+  function stopFire() {
+    clearInterval(spawnTimer);
+    spawnTimer = null;
+    activeEmotes = [];
+  }
+
+  function showBadge(username) {
+    npName.textContent = "@" + username;
+    npBadge.classList.add("visible");
+  }
+
+  function hideBadge() {
+    npBadge.classList.remove("visible");
+  }
+
+  function notifyDone(audio_url) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ done: audio_url.split("/").pop() }));
+    }
+  }
+
+  function playNext() {
+    if (isPlaying || queue.length === 0) return;
+    const { audio_url, username, emotes } = queue.shift();
+    isPlaying = true;
+
+    showBadge(username);
+    if (emotes && emotes.length > 0) startFire(emotes);
+
+    const audio = new Audio(location.origin + audio_url);
+
+    const onDone = () => {
+      notifyDone(audio_url);
+      isPlaying = false;
+      stopFire();
+      hideBadge();
+      playNext();
+    };
+
+    audio.onended = onDone;
+    audio.onerror = onDone;
+    audio.play().catch(onDone);
+  }
+
+  function connect() {
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${protocol}://${location.host}/ws`);
+
+    ws.onopen = () => {
+      console.log("voxer-simple connected");
+      reconnectDelay = RECONNECT_BASE_MS;
+    };
+
+    ws.onclose = () => {
+      console.warn(`voxer-simple disconnected, reconnecting in ${reconnectDelay}ms`);
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (event) => {
+      queue.push(JSON.parse(event.data));
+      playNext();
+    };
+  }
+
+  connect();
+</script>
+</body>
+</html>

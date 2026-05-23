@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -8,6 +9,8 @@ from starlette.responses import FileResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
+
+from .handler import BroadcastEvent
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -33,6 +36,12 @@ class AudioServer:
         async def index(request):
             return FileResponse(
                 _STATIC_DIR / "index.html",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        async def simple(request):
+            return FileResponse(
+                _STATIC_DIR / "simple.html",
                 headers={"Cache-Control": "no-store"},
             )
 
@@ -65,25 +74,24 @@ class AudioServer:
 
         return Starlette(routes=[
             Route("/", index),
+            Route("/simple", simple),
             Route("/favicon.ico", favicon),
             WebSocketRoute("/ws", ws_endpoint),
             Mount("/static", StaticFiles(directory=_STATIC_DIR)),
             Mount("/audio", StaticFiles(directory=self._audio_dir)),
         ])
 
-    async def broadcast(self, url: str, username: str, emotes: list[dict] | None = None) -> None:
+    async def broadcast(self, event: BroadcastEvent) -> None:
         """Send an audio event to all connected WebSocket clients.
 
         Args:
-            url: Relative URL of the MP3 file to play (e.g. "/audio/<uuid>.mp3").
-            username: Twitch username associated with the audio clip.
-            emotes: List of emote dicts with name, url_1x, url_2x, url_4x fields.
+            event: BroadcastEvent with audio_url, username, and emotes list.
         """
         if not self._clients:
             LOGGER.debug("No WS clients connected, skipping broadcast")
             return
-        LOGGER.info("Broadcasting to %d client(s): %s", len(self._clients), url)
-        message = json.dumps({"url": url, "username": username, "emotes": emotes or []})
+        LOGGER.info("Broadcasting to %d client(s): %s", len(self._clients), event.audio_url)
+        message = json.dumps(dataclasses.asdict(event))
         dead: set[WebSocket] = set()
         for ws in self._clients:
             try:
