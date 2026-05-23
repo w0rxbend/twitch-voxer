@@ -7,8 +7,8 @@ from twitchio import eventsub
 from .bot import VoxBot, get_user_id
 from .config import (
     ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, EMOTE_SOUND_PATHS, EMOTES_DB_PATH,
-    MESSAGES_PATH, REFRESH_TOKEN, SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL,
-    SERVER_HOST, SERVER_PORT, VOICES_DIR,
+    MESSAGES_PATH, NO_ANNOUNCE_USERS, REFRESH_TOKEN, SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL,
+    SERVER_HOST, SERVER_PORT, TIMESTAMPS_DB_PATH, VOICES_DIR,
 )
 from .handler import MessageHandler
 from .log import setup_logging
@@ -43,6 +43,8 @@ async def run() -> None:
         message_queue=message_queue,
         emotes_db_path=EMOTES_DB_PATH,
         emote_sound_paths=EMOTE_SOUND_PATHS,
+        timestamps_db_path=TIMESTAMPS_DB_PATH,
+        no_announce_users=NO_ANNOUNCE_USERS,
     )
 
     bot_id = await get_user_id(BOT_USERNAME)

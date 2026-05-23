@@ -3,6 +3,7 @@ import logging
 import random
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -17,6 +18,7 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 _BUILTIN_VOICES: list[str] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
 DEFAULT_LANG: str = "uk"
+_ANNOUNCE_WINDOW_SECS: int = 300  # 5 minutes
 
 _KNOWN_BOTS: frozenset[str] = frozenset({
     "streamelements",
@@ -261,6 +263,8 @@ class MessageHandler:
         message_queue: asyncio.Queue,
         emotes_db_path: str | None = None,
         emote_sound_paths: list[str] | None = None,
+        timestamps_db_path: str = "timestamps.json",
+        no_announce_users: frozenset[str] | None = None,
     ) -> None:
         """Initialize message handler with TTS service and database.
 
@@ -272,12 +276,14 @@ class MessageHandler:
             message_queue: asyncio.Queue for receiving messages from the bot.
             emotes_db_path: Optional path to pickledb file storing emote name → image URLs.
             emote_sound_paths: MP3 files to pick from randomly for emote-only messages.
+            timestamps_db_path: Path to pickledb file storing username → last-message timestamp.
         """
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
         self._voices: list[str] = _BUILTIN_VOICES + tts.custom_voice_names
         LOGGER.info("Voice pool (%d): %s", len(self._voices), self._voices)
         self._db = pickledb.PickleDB(db_path)
+        self._ts_db = pickledb.PickleDB(timestamps_db_path)
         self._audio_dir = audio_dir
         self._broadcast = broadcast
         self._message_queue = message_queue
@@ -285,6 +291,7 @@ class MessageHandler:
         self._emote_sounds: list[Path] = [
             p for raw in (emote_sound_paths or []) if (p := Path(raw)).exists()
         ]
+        self._no_announce_users: frozenset[str] = no_announce_users or frozenset()
         LOGGER.info("MessageHandler ready")
 
     @staticmethod
@@ -321,6 +328,19 @@ class MessageHandler:
         except LangDetectException:
             LOGGER.debug("Lang detection failed, defaulting to %s", DEFAULT_LANG)
             return DEFAULT_LANG
+
+    async def _should_announce(self, username: str) -> bool:
+        """Return True if more than _ANNOUNCE_WINDOW_SECS have passed since the user's last message."""
+        await self._ts_db.load()
+        last = await self._ts_db.get(username)
+        if not last:
+            return True
+        return (time.time() - float(last)) > _ANNOUNCE_WINDOW_SECS
+
+    async def _record_message(self, username: str) -> None:
+        """Persist the current timestamp as the user's last-message time."""
+        await self._ts_db.set(username, str(time.time()))
+        await self._ts_db.save()
 
     async def handle(self, message: QueuedMessage) -> None:
         """Process a queued message via TTS and broadcast to connected clients.
@@ -371,9 +391,13 @@ class MessageHandler:
 
             lang = await self._detect_lang(clean_text)
             voice = await self._get_or_assign_voice(message.username)
-            final_text = _ANNOUNCEMENTS[lang].format(
-                username=message.username, text=_normalize(clean_text, lang)
-            )
+            normalized = _normalize(clean_text, lang)
+            if message.username.lower() not in self._no_announce_users and await self._should_announce(message.username):
+                final_text = _ANNOUNCEMENTS[lang].format(username=message.username, text=normalized)
+                LOGGER.debug("Announcing prefix for %s (outside window)", message.username)
+            else:
+                final_text = normalized
+            await self._record_message(message.username)
 
         twitch_emote_items = [
             EmoteItem(name=name, url=self._emotes[name]["url_2x"])
