@@ -75,7 +75,13 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Chat message event from EventSub.
         """
-        LOGGER.info("Received message: %s — %s", payload.chatter.name, payload.text)
+
+        emote_names = [
+            fragment.text
+            for fragment in payload.fragments
+            if fragment.type == "emote"
+        ]
+        LOGGER.info("Received message: %s — %s - %s", payload.chatter.name, payload.text, emote_names)
         await self._message_queue.put(
             QueuedMessage(username=payload.chatter.name, text=payload.text)
         )
