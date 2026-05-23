@@ -2,90 +2,599 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
-    body { background: transparent; margin: 0; overflow: hidden; }
+    :root {
+      color-scheme: dark;
+      --cyan: #55e6ff;
+      --pink: #ff4fd8;
+      --amber: #ffd166;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: Inter, "Segoe UI", system-ui, sans-serif;
+    }
+
+    #visualizer {
+      position: fixed;
+      inset: 0;
+      opacity: 0;
+      pointer-events: none;
+      transform: scale(0.985);
+      transition: opacity 360ms ease, transform 520ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    #visualizer.visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    #stage-3d {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    #glitch-stage,
+    #energy-field,
+    #scanlines {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: min(56vw, 620px);
+      height: min(56vh, 500px);
+      transform: translate(-50%, -50%);
+    }
+
+    #stage-3d canvas,
+    #glitch-stage canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    #energy-field {
+      background:
+        radial-gradient(circle at 50% 48%, rgba(85, 230, 255, 0.42), transparent 15%),
+        radial-gradient(circle at 52% 48%, rgba(255, 79, 216, 0.34), transparent 24%),
+        radial-gradient(circle at 50% 55%, rgba(255, 209, 102, 0.18), transparent 30%);
+      mix-blend-mode: screen;
+      opacity: 0;
+      border-radius: 50%;
+      filter: blur(18px) saturate(1.45);
+      transform: translate(-50%, -50%) scale(0.42);
+      transition: opacity 260ms ease;
+    }
+
+    #visualizer.visible #energy-field {
+      opacity: 0.82;
+      animation: energy-breathe 900ms ease-in-out infinite alternate;
+    }
+
+    #scanlines {
+      background:
+        repeating-linear-gradient(
+          to bottom,
+          rgba(255, 255, 255, 0.08) 0,
+          rgba(255, 255, 255, 0.08) 1px,
+          transparent 1px,
+          transparent 7px
+        );
+      mix-blend-mode: overlay;
+      opacity: 0;
+    }
+
+    #visualizer.visible #scanlines {
+      opacity: 0.26;
+      animation: scan-drift 720ms steps(8) infinite;
+    }
 
     #now-playing {
       position: fixed;
-      bottom: 24px;
-      right: 24px;
+      right: 28px;
+      bottom: 28px;
       display: flex;
       align-items: center;
-      gap: 10px;
-      background: rgba(0, 0, 0, 0.65);
-      border-radius: 50px;
-      padding: 10px 20px 10px 14px;
+      gap: 12px;
+      max-width: min(420px, calc(100vw - 32px));
+      min-height: 58px;
+      padding: 11px 22px 11px 14px;
+      overflow: hidden;
+      color: #fff;
+      background:
+        linear-gradient(135deg, rgba(11, 18, 26, 0.78), rgba(18, 14, 28, 0.7)),
+        linear-gradient(90deg, rgba(85, 230, 255, 0.26), rgba(255, 79, 216, 0.18));
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
+      box-shadow:
+        0 18px 40px rgba(0, 0, 0, 0.38),
+        0 0 32px rgba(85, 230, 255, 0.18);
       opacity: 0;
-      transform: translateY(8px);
-      transition: opacity 0.3s ease, transform 0.3s ease;
       pointer-events: none;
+      transform: translate3d(0, 10px, 0) scale(0.98);
+      transition: opacity 260ms ease, transform 360ms cubic-bezier(0.2, 0.9, 0.2, 1);
+      z-index: 5;
     }
 
     #now-playing.visible {
       opacity: 1;
-      transform: translateY(0);
+      transform: translate3d(0, 0, 0) scale(1);
     }
 
-    #now-playing svg {
-      width: 32px;
-      height: 32px;
-      flex-shrink: 0;
+    #now-playing::before {
+      position: absolute;
+      inset: -2px;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+      content: "";
+      opacity: 0;
+      transform: translateX(-120%);
+    }
+
+    #now-playing.visible::before {
+      animation: shine 1.8s ease-in-out infinite;
+    }
+
+    #speaker-icon {
+      position: relative;
+      display: grid;
+      width: 38px;
+      height: 38px;
+      flex: 0 0 38px;
+      place-items: center;
+    }
+
+    #speaker-icon img {
+      width: 34px;
+      height: 34px;
+      filter: drop-shadow(0 0 12px rgba(85, 230, 255, 0.72));
+    }
+
+    #now-playing.visible #speaker-icon {
+      animation: icon-pulse 420ms ease-in-out infinite alternate;
     }
 
     #np-username {
-      color: #fff;
-      font-family: 'Inter', 'Segoe UI', sans-serif;
+      min-width: 0;
+      overflow: hidden;
       font-size: 18px;
-      font-weight: 600;
+      font-weight: 750;
+      line-height: 1.2;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 8px rgba(0, 0, 0, 0.72);
       white-space: nowrap;
-      text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+    }
+
+    @keyframes energy-breathe {
+      from {
+        filter: blur(18px) saturate(1.25) hue-rotate(0deg);
+        transform: translate(-50%, -50%) scale(0.42) rotate(-2deg);
+      }
+
+      to {
+        filter: blur(24px) saturate(1.8) hue-rotate(24deg);
+        transform: translate(-50%, -50%) scale(0.58) rotate(2deg);
+      }
+    }
+
+    @keyframes scan-drift {
+      to {
+        transform: translate(-50%, calc(-50% + 14px));
+      }
+    }
+
+    @keyframes shine {
+      10%,
+      100% {
+        opacity: 0;
+        transform: translateX(120%);
+      }
+
+      24% {
+        opacity: 1;
+      }
+    }
+
+    @keyframes icon-pulse {
+      from {
+        transform: scale(0.96);
+      }
+
+      to {
+        transform: scale(1.08);
+      }
+    }
+
+    @media (max-width: 560px) {
+      #glitch-stage,
+      #energy-field,
+      #scanlines {
+        width: min(78vw, 420px);
+        height: min(54vh, 380px);
+      }
+
+      #now-playing {
+        right: 16px;
+        bottom: 16px;
+        max-width: calc(100vw - 32px);
+        min-height: 52px;
+        padding-right: 18px;
+      }
+
+      #np-username {
+        font-size: 16px;
+      }
     }
   </style>
 </head>
 <body>
+<div id="visualizer" aria-hidden="true">
+  <div id="energy-field"></div>
+  <div id="stage-3d"></div>
+  <div id="glitch-stage"></div>
+  <div id="scanlines"></div>
+</div>
 
 <div id="now-playing">
-  <svg version="1.0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-    <g>
-      <path fill="#394240" d="M61,29H49c-1.657,0-3,1.344-3,3s1.343,3,3,3h12c1.657,0,3-1.344,3-3S62.657,29,61,29z M61,33H49c-0.553,0-1-0.447-1-1s0.447-1,1-1h12c0.553,0,1,0.447,1,1S61.553,33,61,33z"/>
-      <path fill="#394240" d="M59.312,44.57l-11.275-4.104c-1.559-0.566-3.279,0.236-3.846,1.793c-0.566,1.555,0.235,3.277,1.793,3.844l11.276,4.105c1.558,0.566,3.278-0.238,3.845-1.793C61.672,46.859,60.87,45.137,59.312,44.57z M59.227,47.732c-0.189,0.52-0.763,0.785-1.281,0.598l-11.277-4.105c-0.52-0.189-0.786-0.762-0.598-1.281c0.189-0.52,0.763-0.787,1.282-0.598l11.276,4.104C59.148,46.639,59.416,47.213,59.227,47.732z"/>
-      <path fill="#394240" d="M48.036,23.531l11.276-4.104c1.557-0.566,2.359-2.289,1.793-3.844c-0.566-1.557-2.288-2.361-3.846-1.795l-11.275,4.105c-1.559,0.566-2.36,2.289-1.794,3.846C44.757,23.295,46.479,24.098,48.036,23.531z M46.668,19.773l11.276-4.105c0.519-0.188,1.093,0.08,1.281,0.6c0.189,0.52-0.078,1.092-0.597,1.281l-11.277,4.104c-0.52,0.189-1.093-0.078-1.281-0.598C45.881,20.535,46.148,19.963,46.668,19.773z"/>
-      <path fill="#394240" d="M37.531,0.307c-1.492-0.625-3.211-0.277-4.359,0.867L18.859,15.486c0,0-0.422,0.514-1.359,0.514C16.293,16,4,16.002,4,16.002c-2.211,0-4,1.789-4,4V44c0,2.211,1.789,4,4,4c0,0,12.688,0,13.344,0s1.107,0.107,1.671,0.67c0.563,0.564,14.157,14.158,14.157,14.158C33.938,63.594,34.961,64,36,64c0.516,0,1.035-0.098,1.531-0.305C39.027,63.078,40,61.617,40,60V4.002C40,2.385,39.027,0.924,37.531,0.307z M6,46H4c-1.104,0-2-0.896-2-2V20c0-1.105,0.896-2,2-2h2V46z M12,46H8V18h4V46z M38,60c0,2-2.188,2.812-4,1c-1.109-1.109-14-14-14-14c-0.75-0.75-1.437-1-2.499-1H14V18h3.501C18.563,18,19,18,20,17c0,0,12.766-12.766,14-14c1.781-1.782,4-0.97,4,1C38,5.062,38,58.938,38,60z"/>
-      <rect x="8" y="18" fill="#45AAB8" width="4" height="28"/>
-      <path fill="#F76D57" d="M2,20v24c0,1.104,0.896,2,2,2h2V18H4C2.896,18,2,18.895,2,20z"/>
-      <path fill="#F76D57" d="M34,3c-1.234,1.233-14,14-14,14c-1,1-1.437,1-2.499,1H14v28h3.501c1.062,0,1.749,0.25,2.499,1c0,0,12.891,12.891,14,14c1.812,1.812,4,1,4-1c0-1.062,0-54.938,0-56C38,2.031,35.781,1.218,34,3z"/>
-      <path fill="#B4CCB9" d="M47.352,21.652l11.277-4.104c0.519-0.189,0.786-0.762,0.597-1.281c-0.188-0.52-0.763-0.787-1.281-0.6l-11.276,4.105c-0.52,0.189-0.787,0.762-0.598,1.281C46.259,21.574,46.832,21.842,47.352,21.652z"/>
-      <path fill="#B4CCB9" d="M61,31H49c-0.553,0-1,0.447-1,1s0.447,1,1,1h12c0.553,0,1-0.447,1-1S61.553,31,61,31z"/>
-      <path fill="#B4CCB9" d="M58.629,46.449l-11.276-4.104c-0.52-0.189-1.093,0.078-1.282,0.598c-0.188,0.52,0.078,1.092,0.598,1.281l11.277,4.105c0.519,0.188,1.092-0.078,1.281-0.598S59.148,46.639,58.629,46.449z"/>
-    </g>
-  </svg>
+  <span id="speaker-icon"><img src="/static/speaker.svg" alt=""></span>
   <span id="np-username"></span>
 </div>
 
-<script>
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js"></script>
+<script type="module">
   const RECONNECT_BASE_MS = 1000;
   const RECONNECT_MAX_MS = 30000;
-
   const queue = [];
+
   let isPlaying = false;
   let ws = null;
   let reconnectDelay = RECONNECT_BASE_MS;
+  let THREE = null;
+  let GLTFLoader = null;
 
-  const nowPlaying = document.getElementById('now-playing');
-  const npUsername = document.getElementById('np-username');
+  const visualizer = document.getElementById("visualizer");
+  const nowPlaying = document.getElementById("now-playing");
+  const npUsername = document.getElementById("np-username");
+
+  const visualState = {
+    active: false,
+    burst: 0,
+    bass: 0,
+    startedAt: 0,
+  };
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function createThreeSpeaker() {
+    const container = document.getElementById("stage-3d");
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 100);
+    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+    const speakerRig = new THREE.Group();
+    const speakerFace = new THREE.Group();
+    const haloRig = new THREE.Group();
+    let speaker = null;
+
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.22;
+    container.appendChild(renderer.domElement);
+
+    camera.position.set(0, 0.32, 7.6);
+    scene.add(speakerRig);
+    speakerRig.add(speakerFace);
+    scene.add(haloRig);
+
+    const keyLight = new THREE.PointLight(0x55e6ff, 4.2, 18);
+    keyLight.position.set(-3.4, 2.8, 4.2);
+    scene.add(keyLight);
+
+    const rimLight = new THREE.PointLight(0xff4fd8, 3.8, 16);
+    rimLight.position.set(3.1, -1.8, 3.8);
+    scene.add(rimLight);
+
+    const fillLight = new THREE.HemisphereLight(0xb7f7ff, 0x181022, 2.2);
+    scene.add(fillLight);
+
+    for (let i = 0; i < 4; i += 1) {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(1.35 + i * 0.26, 0.012, 10, 120),
+        new THREE.MeshBasicMaterial({
+          color: i % 2 === 0 ? 0x55e6ff : 0xff4fd8,
+          transparent: true,
+          opacity: 0,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        })
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.userData.offset = i * 0.17;
+      haloRig.add(ring);
+    }
+
+    function addFallbackSpeaker() {
+      const body = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.85, 0.98, 0.72, 64),
+        new THREE.MeshStandardMaterial({
+          color: 0x202733,
+          metalness: 0.55,
+          roughness: 0.28,
+          emissive: 0x07141c,
+        })
+      );
+      const cone = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.24, 0.68, 0.4, 64),
+        new THREE.MeshStandardMaterial({
+          color: 0x0b1218,
+          metalness: 0.2,
+          roughness: 0.46,
+          emissive: 0x153241,
+          emissiveIntensity: 0.45,
+        })
+      );
+      const center = new THREE.Mesh(
+        new THREE.SphereGeometry(0.23, 40, 24),
+        new THREE.MeshStandardMaterial({
+          color: 0x55e6ff,
+          emissive: 0x55e6ff,
+          emissiveIntensity: 0.55,
+          metalness: 0.18,
+          roughness: 0.22,
+        })
+      );
+      body.rotation.x = Math.PI / 2;
+      cone.rotation.x = Math.PI / 2;
+      cone.position.z = 0.28;
+      center.position.z = 0.52;
+      speakerFace.add(body, cone, center);
+      speaker = speakerFace;
+    }
+
+    new GLTFLoader().load(
+      "/static/speaker.glb",
+      (gltf) => {
+        speaker = gltf.scene;
+        const box = new THREE.Box3().setFromObject(speaker);
+        const size = box.getSize(new THREE.Vector3());
+        const center = box.getCenter(new THREE.Vector3());
+        const maxAxis = Math.max(size.x, size.y, size.z) || 1;
+
+        speaker.position.sub(center);
+        speaker.scale.setScalar(1.35 / maxAxis);
+        speaker.rotation.set(0, 0, 0);
+        speaker.traverse((node) => {
+          if (node.isMesh && node.material) {
+            node.castShadow = true;
+            node.receiveShadow = true;
+            node.material = node.material.clone();
+            node.material.envMapIntensity = 1.35;
+          }
+        });
+        speakerFace.add(speaker);
+      },
+      undefined,
+      (error) => {
+        console.error("Failed to load speaker.glb:", error);
+        addFallbackSpeaker();
+      }
+    );
+
+    function resize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    window.addEventListener("resize", resize);
+
+    function frame(time) {
+      const seconds = time * 0.001;
+      const beat = visualState.active ? 1 : 0;
+      const pulse = visualState.bass;
+      const burst = visualState.burst;
+
+      speakerRig.visible = visualState.active || burst > 0.02;
+      speakerRig.rotation.y = Math.sin(seconds * 1.3) * 0.08;
+      speakerRig.rotation.x = Math.sin(seconds * 1.7) * 0.05 + pulse * 0.04;
+      speakerRig.rotation.z = Math.sin(seconds * 2.1) * 0.025;
+      speakerRig.scale.setScalar(1 + pulse * 0.22 + burst * 0.12);
+      speakerRig.position.y = Math.sin(seconds * 2.4) * 0.08;
+      speakerFace.position.z = burst * 0.08 + pulse * 0.05;
+
+      keyLight.intensity = 2.8 + beat * 1.8 + pulse * 3.4;
+      rimLight.intensity = 2.2 + burst * 5.2;
+
+      haloRig.children.forEach((ring, index) => {
+        const phase = (seconds * 0.74 + ring.userData.offset) % 1;
+        const activeOpacity = visualState.active ? 0.34 : 0;
+        ring.scale.setScalar(0.42 + phase * 1.15 + burst * 0.18);
+        ring.material.opacity = activeOpacity * (1 - phase) + burst * 0.14;
+        ring.rotation.z = seconds * (0.24 + index * 0.08);
+      });
+
+      visualState.bass *= 0.91;
+      visualState.burst *= 0.88;
+      renderer.render(scene, camera);
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  function createPixiGlitch() {
+    const container = document.getElementById("glitch-stage");
+    const app = new PIXI.Application({
+      width: container.clientWidth,
+      height: container.clientHeight,
+      backgroundAlpha: 0,
+      antialias: true,
+      autoDensity: true,
+      resolution: Math.min(window.devicePixelRatio || 1, 2),
+    });
+    const slices = new PIXI.Container();
+    const noiseCanvas = document.createElement("canvas");
+    const noiseCtx = noiseCanvas.getContext("2d");
+    const displacementSprite = PIXI.Sprite.from(noiseCanvas);
+    const DisplacementFilter = PIXI.DisplacementFilter || PIXI.filters.DisplacementFilter;
+    const ColorMatrixFilter = PIXI.ColorMatrixFilter || PIXI.filters.ColorMatrixFilter;
+    const BlurFilter = PIXI.BlurFilter || PIXI.filters.BlurFilter;
+    const displacementFilter = new DisplacementFilter(displacementSprite);
+    const colorMatrix = new ColorMatrixFilter();
+    const glow = new BlurFilter(0);
+    const bars = [];
+
+    container.appendChild(app.view);
+    app.stage.filters = [displacementFilter, colorMatrix, glow];
+    app.stage.addChild(displacementSprite, slices);
+    displacementSprite.texture.baseTexture.wrapMode = PIXI.WRAP_MODES.REPEAT;
+
+    function paintNoise() {
+      const size = 128;
+      noiseCanvas.width = size;
+      noiseCanvas.height = size;
+      const image = noiseCtx.createImageData(size, size);
+      for (let i = 0; i < image.data.length; i += 4) {
+        const value = Math.random() * 255;
+        image.data[i] = value;
+        image.data[i + 1] = 255 - value;
+        image.data[i + 2] = Math.random() * 255;
+        image.data[i + 3] = 255;
+      }
+      noiseCtx.putImageData(image, 0, 0);
+      displacementSprite.texture.update();
+    }
+
+    function rebuildBars() {
+      slices.removeChildren();
+      bars.length = 0;
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+      app.renderer.resize(width, height);
+      const count = Math.max(10, Math.round(height / 38));
+      for (let i = 0; i < count; i += 1) {
+        const bar = new PIXI.Graphics();
+        bar.y = (i / count) * height;
+        bar.alpha = 0;
+        slices.addChild(bar);
+        bars.push(bar);
+      }
+    }
+
+    paintNoise();
+    rebuildBars();
+    window.addEventListener("resize", rebuildBars);
+
+    app.ticker.add((ticker) => {
+      const energy = visualState.active ? 0.72 + visualState.bass * 1.25 : visualState.burst * 0.9;
+      const time = ticker.lastTime * 0.001;
+      const width = container.clientWidth;
+      const stageHeight = container.clientHeight;
+
+      if (Math.random() < 0.09 + energy * 0.14) {
+        paintNoise();
+      }
+
+      displacementSprite.x = Math.sin(time * 2.7) * 58;
+      displacementSprite.y = Math.cos(time * 3.1) * 42;
+      displacementFilter.scale.set(energy * 18, energy * 8);
+      glow.blur = energy * 1.4;
+      colorMatrix.reset();
+      colorMatrix.saturate(1 + energy * 1.4, false);
+      colorMatrix.hue(Math.sin(time * 2.2) * energy * 22, false);
+
+      bars.forEach((bar, index) => {
+        const barHeight = 3 + ((index * 17) % 12);
+        const y = (index / bars.length) * stageHeight;
+        const barWidth = width * (0.2 + Math.random() * 0.52);
+        const xShift = (Math.random() - 0.5) * energy * 68;
+        const hue = index % 3 === 0 ? 0x55e6ff : index % 3 === 1 ? 0xff4fd8 : 0xffd166;
+
+        bar.clear();
+        bar.beginFill(hue, 0.13 + energy * 0.25);
+        bar.drawRect(width * 0.5 - barWidth * 0.5 + xShift, y, barWidth, barHeight);
+        bar.endFill();
+        bar.alpha = energy * (0.16 + Math.random() * 0.5);
+      });
+    });
+  }
+
+  function triggerVisuals() {
+    visualState.active = true;
+    visualState.burst = 1;
+    visualState.bass = 1;
+    visualState.startedAt = performance.now();
+    visualizer.classList.add("visible");
+  }
+
+  function relaxVisuals() {
+    visualState.active = false;
+    visualizer.classList.remove("visible");
+  }
 
   function showSpeaker(username) {
-    npUsername.textContent = '@' + username;
-    nowPlaying.classList.add('visible');
+    npUsername.textContent = "@" + username;
+    nowPlaying.classList.add("visible");
+    triggerVisuals();
   }
 
   function hideSpeaker() {
-    nowPlaying.classList.remove('visible');
+    nowPlaying.classList.remove("visible");
+    relaxVisuals();
   }
 
   function notifyDone(url) {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ done: url.split("/").pop() }));
+    }
+  }
+
+  function connectAudioReactivity(audio) {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+
+    try {
+      const audioContext = new AudioContext();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaElementSource(audio);
+      const data = new Uint8Array(analyser.frequencyBinCount);
+
+      analyser.fftSize = 128;
+      analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser);
+      analyser.connect(audioContext.destination);
+
+      function sample() {
+        if (!visualState.active) return;
+        analyser.getByteFrequencyData(data);
+        const lowBins = data.slice(0, 14);
+        const sum = lowBins.reduce((total, value) => total + value, 0);
+        visualState.bass = clamp(sum / (lowBins.length * 255), 0.08, 1);
+        requestAnimationFrame(sample);
+      }
+
+      audio.addEventListener("play", () => {
+        audioContext.resume();
+        sample();
+      }, { once: true });
+    } catch (error) {
+      console.warn("Audio analyser unavailable:", error);
     }
   }
 
@@ -96,8 +605,17 @@
     const fullUrl = location.origin + url;
     console.log(`[${username}] ${fullUrl}`);
     showSpeaker(username);
+
     const audio = new Audio(fullUrl);
-    audio.onended = () => { notifyDone(url); isPlaying = false; hideSpeaker(); playNext(); };
+    connectAudioReactivity(audio);
+
+    audio.onended = () => {
+      notifyDone(url);
+      isPlaying = false;
+      hideSpeaker();
+      playNext();
+    };
+
     audio.onerror = () => {
       console.error(`Failed to play: ${fullUrl}`);
       notifyDone(url);
@@ -105,11 +623,19 @@
       hideSpeaker();
       playNext();
     };
-    audio.play();
+
+    audio.play().catch((error) => {
+      console.error("Playback failed:", error);
+      notifyDone(url);
+      isPlaying = false;
+      hideSpeaker();
+      playNext();
+    });
   }
 
   function connect() {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    const protocol = location.protocol === "https:" ? "wss" : "ws";
+    ws = new WebSocket(`${protocol}://${location.host}/ws`);
 
     ws.onopen = () => {
       console.log("voxer connected");
@@ -134,6 +660,29 @@
   }
 
   connect();
+
+  async function initVisuals() {
+    try {
+      [THREE, { GLTFLoader }] = await Promise.all([
+        import("https://esm.sh/three@0.160.0"),
+        import("https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js"),
+      ]);
+      createThreeSpeaker();
+    } catch (error) {
+      console.error("Three.js visualizer unavailable:", error);
+    }
+
+    try {
+      if (!window.PIXI) {
+        throw new Error("PIXI global was not loaded");
+      }
+      createPixiGlitch();
+    } catch (error) {
+      console.error("PixiJS glitch layer unavailable:", error);
+    }
+  }
+
+  initVisuals();
 </script>
 </body>
 </html>

@@ -31,7 +31,10 @@ class AudioServer:
 
     def _build_app(self) -> Starlette:
         async def index(request):
-            return FileResponse(_STATIC_DIR / "index.html")
+            return FileResponse(
+                _STATIC_DIR / "index.html",
+                headers={"Cache-Control": "no-store"},
+            )
 
         async def favicon(request):
             return Response(content=b"", media_type="image/x-icon")
@@ -64,6 +67,7 @@ class AudioServer:
             Route("/", index),
             Route("/favicon.ico", favicon),
             WebSocketRoute("/ws", ws_endpoint),
+            Mount("/static", StaticFiles(directory=_STATIC_DIR)),
             Mount("/audio", StaticFiles(directory=self._audio_dir)),
         ])
 
