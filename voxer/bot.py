@@ -76,16 +76,16 @@ class VoxBot(commands.AutoBot):
             payload: Chat message event from EventSub.
         """
 
+        tts_text = " ".join(
+            fragment.text for fragment in payload.fragments if fragment.type == "text"
+        ).strip()
         emote_names = [
-            fragment.text
-            for fragment in payload.fragments
-            if fragment.type == "emote"
+            fragment.text for fragment in payload.fragments if fragment.type == "emote"
         ]
-        LOGGER.info("Received message: %s — %s - %s", payload.chatter.name, payload.text, emote_names)
+        LOGGER.info("Received message: %s — text=%r emotes=%r", payload.chatter.name, tts_text, emote_names)
         await self._message_queue.put(
-            QueuedMessage(username=payload.chatter.name, text=payload.text)
+            QueuedMessage(username=payload.chatter.name, text=tts_text, emote_names=emote_names)
         )
-        LOGGER.debug("Queued message from %s", payload.chatter.name)
         await super().event_message(payload)
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:

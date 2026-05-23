@@ -218,6 +218,44 @@
       }
     }
 
+    #emote-layer {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      overflow: hidden;
+      z-index: 20;
+    }
+
+    .emote-particle {
+      position: absolute;
+      object-fit: contain;
+      image-rendering: auto;
+      transform-origin: center center;
+      will-change: transform, opacity;
+      animation: emote-fly var(--dur) var(--ease) var(--delay) both;
+    }
+
+    @keyframes emote-fly {
+      0% {
+        opacity: 0;
+        transform: translate(0, 0) scale(0.25) rotate(var(--r0));
+      }
+
+      14% {
+        opacity: 1;
+        transform: translate(calc(var(--tx) * 0.08), calc(var(--ty) * 0.08)) scale(1.2) rotate(calc(var(--r0) + 8deg));
+      }
+
+      80% {
+        opacity: 0.88;
+      }
+
+      100% {
+        opacity: 0;
+        transform: translate(var(--tx), var(--ty)) scale(0.55) rotate(var(--r1));
+      }
+    }
+
     @media (max-width: 560px) {
       #glitch-stage,
       #energy-field,
@@ -247,6 +285,8 @@
   <div id="glitch-stage"></div>
   <div id="scanlines"></div>
 </div>
+
+<div id="emote-layer" aria-hidden="true"></div>
 
 <div id="now-playing">
   <span id="speaker-icon"><img src="/static/speaker.svg" alt=""></span>
@@ -548,10 +588,64 @@
     visualizer.classList.remove("visible");
   }
 
-  function showSpeaker(username) {
+  const emoteLayer = document.getElementById("emote-layer");
+  const EMOTE_COUNT = 52;
+  const EMOTE_EASES = [
+    "cubic-bezier(0.12,0.8,0.28,1)",
+    "cubic-bezier(0.2,0.6,0.3,1)",
+    "cubic-bezier(0.08,0.9,0.22,1)",
+  ];
+
+  function spawnEmotes(emotes) {
+    if (!emotes || emotes.length === 0) return;
+
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+
+    for (let i = 0; i < EMOTE_COUNT; i++) {
+      const emote = emotes[i % emotes.length];
+      const delay = Math.random() * 2800;
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 180 + Math.random() * Math.min(cx, cy) * 1.1;
+      const tx = Math.cos(angle) * dist;
+      const ty = Math.sin(angle) * dist;
+      const size = 30 + Math.random() * 38;
+      const dur = 1400 + Math.random() * 1800;
+      const r0 = (Math.random() - 0.5) * 60;
+      const r1 = r0 + (Math.random() - 0.5) * 200;
+      const ease = EMOTE_EASES[Math.floor(Math.random() * EMOTE_EASES.length)];
+
+      const startX = cx + (Math.random() - 0.5) * 140;
+      const startY = cy + (Math.random() - 0.5) * 120;
+
+      const img = new Image();
+      img.className = "emote-particle";
+      img.src = emote.url_2x;
+      img.alt = emote.name;
+      img.style.cssText = [
+        `left:${startX - size / 2}px`,
+        `top:${startY - size / 2}px`,
+        `width:${size}px`,
+        `height:${size}px`,
+        `--tx:${tx}px`,
+        `--ty:${ty}px`,
+        `--r0:${r0}deg`,
+        `--r1:${r1}deg`,
+        `--dur:${dur}ms`,
+        `--delay:${delay}ms`,
+        `--ease:${ease}`,
+      ].join(";");
+
+      emoteLayer.appendChild(img);
+      img.addEventListener("animationend", () => img.remove(), { once: true });
+    }
+  }
+
+  function showSpeaker(username, emotes) {
     npUsername.textContent = "@" + username;
     nowPlaying.classList.add("visible");
     triggerVisuals();
+    spawnEmotes(emotes);
   }
 
   function hideSpeaker() {
@@ -600,11 +694,11 @@
 
   function playNext() {
     if (isPlaying || queue.length === 0) return;
-    const { url, username } = queue.shift();
+    const { url, username, emotes } = queue.shift();
     isPlaying = true;
     const fullUrl = location.origin + url;
-    console.log(`[${username}] ${fullUrl}`);
-    showSpeaker(username);
+    console.log(`[${username}] ${fullUrl}`, emotes?.map(e => e.name));
+    showSpeaker(username, emotes);
 
     const audio = new Audio(fullUrl);
     connectAudioReactivity(audio);

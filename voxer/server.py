@@ -71,18 +71,19 @@ class AudioServer:
             Mount("/audio", StaticFiles(directory=self._audio_dir)),
         ])
 
-    async def broadcast(self, url: str, username: str) -> None:
+    async def broadcast(self, url: str, username: str, emotes: list[dict] | None = None) -> None:
         """Send an audio event to all connected WebSocket clients.
 
         Args:
             url: Relative URL of the MP3 file to play (e.g. "/audio/<uuid>.mp3").
             username: Twitch username associated with the audio clip.
+            emotes: List of emote dicts with name, url_1x, url_2x, url_4x fields.
         """
         if not self._clients:
             LOGGER.debug("No WS clients connected, skipping broadcast")
             return
         LOGGER.info("Broadcasting to %d client(s): %s", len(self._clients), url)
-        message = json.dumps({"url": url, "username": username})
+        message = json.dumps({"url": url, "username": username, "emotes": emotes or []})
         dead: set[WebSocket] = set()
         for ws in self._clients:
             try:

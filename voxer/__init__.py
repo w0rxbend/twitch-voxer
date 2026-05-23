@@ -6,7 +6,7 @@ from twitchio import eventsub
 
 from .bot import VoxBot, get_user_id
 from .config import (
-    ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, MESSAGES_PATH, REFRESH_TOKEN,
+    ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, EMOTES_DB_PATH, MESSAGES_PATH, REFRESH_TOKEN,
     SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL,
     SERVER_HOST, SERVER_PORT, VOICES_DIR,
 )
@@ -41,6 +41,7 @@ async def run() -> None:
         audio_dir=audio_dir,
         broadcast=server.broadcast,
         message_queue=message_queue,
+        emotes_db_path=EMOTES_DB_PATH,
     )
 
     bot_id = await get_user_id(BOT_USERNAME)

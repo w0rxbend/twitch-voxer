@@ -193,6 +193,7 @@ class QueuedMessage:
     username: str
     text: str
     kind: MessageKind = field(default=MessageKind.USER)
+    emote_names: list[str] = field(default_factory=list)
 
 
 
@@ -228,6 +229,7 @@ class MessageHandler:
         audio_dir: Path,
         broadcast,
         message_queue: asyncio.Queue,
+        emotes_db_path: str | None = None,
     ) -> None:
         """Initialize message handler with TTS service and database.
 
@@ -237,6 +239,7 @@ class MessageHandler:
             audio_dir: Directory for storing generated MP3 files.
             broadcast: Async function to broadcast audio via WebSocket to connected clients.
             message_queue: asyncio.Queue for receiving messages from the bot.
+            emotes_db_path: Optional path to pickledb file storing emote name → image URLs.
         """
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
@@ -246,7 +249,21 @@ class MessageHandler:
         self._audio_dir = audio_dir
         self._broadcast = broadcast
         self._message_queue = message_queue
+        self._emotes: dict[str, dict] = self._load_emotes(emotes_db_path)
         LOGGER.info("MessageHandler ready")
+
+    @staticmethod
+    def _load_emotes(path: str | None) -> dict[str, dict]:
+        if not path:
+            return {}
+        try:
+            import json
+            data = json.loads(Path(path).read_bytes())
+            LOGGER.info("Loaded %d emotes from %s", len(data), path)
+            return data
+        except (FileNotFoundError, ValueError) as exc:
+            LOGGER.warning("Could not load emotes DB (%s): %s", path, exc)
+            return {}
 
     async def _get_or_assign_voice(self, username: str) -> str:
         await self._db.load()
@@ -298,6 +315,12 @@ class MessageHandler:
                 username=message.username, text=_normalize(message.text, lang)
             )
 
+        emotes = [
+            {"name": name, **self._emotes[name]}
+            for name in message.emote_names
+            if name in self._emotes
+        ]
+
         wav_path = self._tts.save_wav(announced, voice_name=voice, lang=lang)
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
         try:
@@ -305,8 +328,8 @@ class MessageHandler:
         finally:
             wav_path.unlink()
 
-        LOGGER.info("Broadcasting audio for %s -> %s", message.username, mp3_path.name)
-        await self._broadcast(url=f"/audio/{mp3_path.name}", username=message.username)
+        LOGGER.info("Broadcasting audio for %s -> %s (emotes: %s)", message.username, mp3_path.name, [e["name"] for e in emotes])
+        await self._broadcast(url=f"/audio/{mp3_path.name}", username=message.username, emotes=emotes)
 
     async def process_queue(self) -> None:
         """Continuously drain the message queue, invoking handle() for each QueuedMessage."""
