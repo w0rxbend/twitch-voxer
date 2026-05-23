@@ -1,56 +1,260 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 160" width="480" height="160">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 580 200" width="580" height="200">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1a0533"/>
-      <stop offset="100%" style="stop-color:#0d001f"/>
+    <!-- Dark wall background -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#080010"/>
+      <stop offset="100%" style="stop-color:#030008"/>
     </linearGradient>
-    <linearGradient id="purple" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#bf94ff"/>
-      <stop offset="100%" style="stop-color:#9146ff"/>
+
+    <!-- Main text gradient: hot pink → purple → violet -->
+    <linearGradient id="textGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff2fff"/>
+      <stop offset="40%" style="stop-color:#cc00ff"/>
+      <stop offset="100%" style="stop-color:#6600ee"/>
     </linearGradient>
-    <filter id="glow">
-      <feGaussianBlur stdDeviation="3" result="blur"/>
-      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+
+    <!-- Cyan accent -->
+    <linearGradient id="cyanGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#00ffee"/>
+      <stop offset="100%" style="stop-color:#0055ff"/>
+    </linearGradient>
+
+    <!-- Mic gradient -->
+    <linearGradient id="micGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#dd00ff"/>
+      <stop offset="100%" style="stop-color:#7700cc"/>
+    </linearGradient>
+
+    <!-- Neon glow filter -->
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="3" result="b1"/>
+      <feGaussianBlur stdDeviation="7" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
     </filter>
+
+    <!-- Soft glow for text -->
+    <filter id="textGlow" x="-15%" y="-30%" width="130%" height="160%">
+      <feGaussianBlur stdDeviation="5" result="b1"/>
+      <feGaussianBlur stdDeviation="12" result="b2"/>
+      <feMerge>
+        <feMergeNode in="b2"/>
+        <feMergeNode in="b1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Spray paint texture -->
+    <filter id="sprayTex" x="0%" y="0%" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.75" numOctaves="4" seed="3" result="noise"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.4 0" result="alpha"/>
+      <feComposite in="SourceGraphic" in2="alpha" operator="over"/>
+    </filter>
+
+    <!-- Radial spray halo -->
+    <radialGradient id="sprayHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#9900ff;stop-opacity:0.35"/>
+      <stop offset="100%" style="stop-color:#000000;stop-opacity:0"/>
+    </radialGradient>
+
+    <radialGradient id="cyanHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#00ffcc;stop-opacity:0.2"/>
+      <stop offset="100%" style="stop-color:#000000;stop-opacity:0"/>
+    </radialGradient>
   </defs>
 
-  <!-- Background -->
-  <rect width="480" height="160" rx="16" fill="url(#bg)"/>
+  <!-- ═══ BACKGROUND ═══ -->
+  <rect width="580" height="200" fill="url(#bgGrad)"/>
 
-  <!-- Mic body -->
-  <rect x="34" y="38" width="28" height="44" rx="14" fill="url(#purple)" filter="url(#glow)"/>
-  <!-- Mic stand arc -->
-  <path d="M26 76 Q26 104 48 104 Q70 104 70 76" fill="none" stroke="#9146ff" stroke-width="4" stroke-linecap="round"/>
-  <!-- Mic stand pole -->
-  <line x1="48" y1="104" x2="48" y2="118" stroke="#9146ff" stroke-width="4" stroke-linecap="round"/>
-  <!-- Mic stand base -->
-  <line x1="36" y1="118" x2="60" y2="118" stroke="#9146ff" stroke-width="4" stroke-linecap="round"/>
+  <!-- Concrete wall texture overlay -->
+  <rect width="580" height="200" fill="none" stroke="none">
+    <animate attributeName="opacity" values="0" dur="0s" fill="freeze"/>
+  </rect>
 
-  <!-- Sound waves (right of mic) -->
-  <g filter="url(#glow)" opacity="0.9">
-    <path d="M78 68 Q86 80 78 92" fill="none" stroke="#bf94ff" stroke-width="3.5" stroke-linecap="round"/>
-    <path d="M88 60 Q100 80 88 100" fill="none" stroke="#9146ff" stroke-width="3" stroke-linecap="round"/>
-    <path d="M98 52 Q114 80 98 108" fill="none" stroke="#7b2fff" stroke-width="2.5" stroke-linecap="round" opacity="0.7"/>
+  <!-- Spray halo blobs -->
+  <ellipse cx="78" cy="95" rx="75" ry="75" fill="url(#sprayHalo)"/>
+  <ellipse cx="500" cy="110" rx="55" ry="55" fill="url(#cyanHalo)"/>
+  <ellipse cx="280" cy="130" rx="180" ry="50" fill="#6600ff" opacity="0.06"/>
+
+  <!-- Background slash marks (wall art) -->
+  <line x1="0"   y1="60"  x2="55"  y2="200" stroke="#1a0038" stroke-width="4" opacity="0.6"/>
+  <line x1="20"  y1="0"   x2="90"  y2="200" stroke="#100025" stroke-width="3" opacity="0.5"/>
+  <line x1="545" y1="0"   x2="480" y2="200" stroke="#1a0038" stroke-width="4" opacity="0.5"/>
+
+  <!-- ═══ MIC ICON ═══ -->
+  <g transform="translate(18, 12)">
+    <!-- Spray halo -->
+    <ellipse cx="42" cy="78" rx="52" ry="52" fill="#7700ff" opacity="0.18" filter="url(#glow)"/>
+
+    <!-- Mic outline/glow -->
+    <rect x="20" y="28" width="34" height="54" rx="17" fill="none" stroke="#ff00ff" stroke-width="7" opacity="0.35" filter="url(#glow)"/>
+
+    <!-- Mic body -->
+    <rect x="22" y="30" width="30" height="50" rx="15" fill="#0d0022"/>
+    <rect x="22" y="30" width="30" height="50" rx="15" fill="url(#micGrad)" opacity="0.95" filter="url(#glow)"/>
+
+    <!-- Mic grille lines -->
+    <line x1="28" y1="42" x2="46" y2="42" stroke="#ffffff" stroke-width="1.5" opacity="0.25" stroke-linecap="round"/>
+    <line x1="26" y1="50" x2="48" y2="50" stroke="#ffffff" stroke-width="1.5" opacity="0.25" stroke-linecap="round"/>
+    <line x1="26" y1="58" x2="48" y2="58" stroke="#ffffff" stroke-width="1.5" opacity="0.25" stroke-linecap="round"/>
+    <line x1="28" y1="66" x2="46" y2="66" stroke="#ffffff" stroke-width="1"   opacity="0.15" stroke-linecap="round"/>
+
+    <!-- Stand arc -->
+    <path d="M14 76 Q14 110 37 110 Q60 110 60 76" fill="none" stroke="url(#micGrad)" stroke-width="4.5" stroke-linecap="round" filter="url(#glow)"/>
+    <!-- Pole -->
+    <line x1="37" y1="110" x2="37" y2="126" stroke="#cc00ff" stroke-width="4.5" stroke-linecap="round"/>
+    <!-- Base -->
+    <line x1="22" y1="126" x2="52" y2="126" stroke="#cc00ff" stroke-width="5" stroke-linecap="round" filter="url(#glow)"/>
+
+    <!-- Angular sound waves (graffiti sharp zig-zag style) -->
+    <g filter="url(#glow)">
+      <path d="M68 62 L74 72 L68 82 L74 92 L68 102" fill="none" stroke="#00ffee" stroke-width="3.5" stroke-linecap="square" stroke-linejoin="miter"/>
+      <path d="M80 54 L88 68 L80 82 L88 96 L80 110" fill="none" stroke="#cc00ff" stroke-width="3"   stroke-linecap="square" stroke-linejoin="miter" opacity="0.85"/>
+      <path d="M92 46 L102 64 L92 82 L102 100 L92 118" fill="none" stroke="#ff00cc" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter" opacity="0.65"/>
+    </g>
   </g>
 
-  <!-- Wordmark -->
-  <text x="128" y="106"
-        font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
-        font-size="64"
-        font-weight="700"
-        letter-spacing="-1"
-        fill="url(#purple)"
-        filter="url(#glow)">voxer</text>
+  <!-- ═══ VOXER — GRAFFITI TITLE ═══ -->
 
-  <!-- Twitch-style accent bar under text -->
-  <rect x="128" y="114" width="320" height="4" rx="2" fill="#9146ff" opacity="0.5"/>
+  <!-- Layer 1: Drop shadow (offset + dark) -->
+  <text x="157" y="122"
+        font-family="Impact, 'Arial Black', 'Haettenschweiler', 'Franklin Gothic Heavy', sans-serif"
+        font-size="88"
+        font-weight="900"
+        letter-spacing="-4"
+        fill="#110022"
+        opacity="0.8"
+        transform="skewX(-8) translate(5,5)">VOXER</text>
 
-  <!-- Small tagline -->
-  <text x="130" y="138"
-        font-family="'Segoe UI', 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif"
-        font-size="15"
-        font-weight="400"
-        letter-spacing="2"
-        fill="#bf94ff"
-        opacity="0.75">TWITCH  CHAT  TTS</text>
+  <!-- Layer 2: Fat outer stroke (deep magenta) -->
+  <text x="152" y="117"
+        font-family="Impact, 'Arial Black', 'Haettenschweiler', 'Franklin Gothic Heavy', sans-serif"
+        font-size="88"
+        font-weight="900"
+        letter-spacing="-4"
+        fill="none"
+        stroke="#cc0066"
+        stroke-width="14"
+        stroke-linejoin="round"
+        opacity="0.7"
+        transform="skewX(-8)">VOXER</text>
+
+  <!-- Layer 3: Mid stroke (bright pink) with glow -->
+  <text x="152" y="117"
+        font-family="Impact, 'Arial Black', 'Haettenschweiler', 'Franklin Gothic Heavy', sans-serif"
+        font-size="88"
+        font-weight="900"
+        letter-spacing="-4"
+        fill="none"
+        stroke="#ff00aa"
+        stroke-width="8"
+        stroke-linejoin="round"
+        filter="url(#glow)"
+        opacity="0.9"
+        transform="skewX(-8)">VOXER</text>
+
+  <!-- Layer 4: Main fill (gradient) -->
+  <text x="152" y="117"
+        font-family="Impact, 'Arial Black', 'Haettenschweiler', 'Franklin Gothic Heavy', sans-serif"
+        font-size="88"
+        font-weight="900"
+        letter-spacing="-4"
+        fill="url(#textGrad)"
+        filter="url(#textGlow)"
+        transform="skewX(-8)">VOXER</text>
+
+  <!-- Layer 5: Thin white highlight stroke -->
+  <text x="152" y="117"
+        font-family="Impact, 'Arial Black', 'Haettenschweiler', 'Franklin Gothic Heavy', sans-serif"
+        font-size="88"
+        font-weight="900"
+        letter-spacing="-4"
+        fill="none"
+        stroke="#ffffff"
+        stroke-width="1.5"
+        stroke-linejoin="round"
+        opacity="0.25"
+        transform="skewX(-8)">VOXER</text>
+
+  <!-- ═══ PAINT DRIPS ═══ -->
+  <!-- Drip 1 (under V) -->
+  <path d="M158 122 Q157 136 160 148 Q161 156 159 164" stroke="#ff00ff" stroke-width="4.5" fill="none" stroke-linecap="round" opacity="0.7" filter="url(#glow)"/>
+  <ellipse cx="159" cy="167" rx="4" ry="5.5" fill="#ff00ff" opacity="0.7" filter="url(#glow)"/>
+
+  <!-- Drip 2 (under O) -->
+  <path d="M203 122 Q204 132 202 142 Q201 148 203 154" stroke="#cc00ff" stroke-width="3.5" fill="none" stroke-linecap="round" opacity="0.65" filter="url(#glow)"/>
+  <ellipse cx="203" cy="157" rx="3.5" ry="4.5" fill="#cc00ff" opacity="0.65" filter="url(#glow)"/>
+
+  <!-- Drip 3 (under X) -->
+  <path d="M252 122 Q254 138 251 150" stroke="#9900ff" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.55" filter="url(#glow)"/>
+  <ellipse cx="251" cy="153" rx="3" ry="4" fill="#9900ff" opacity="0.55" filter="url(#glow)"/>
+
+  <!-- Drip 4 (under R, small) -->
+  <path d="M368 118 Q370 128 368 136" stroke="#ff00cc" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.45"/>
+  <circle cx="368" cy="138" r="2.5" fill="#ff00cc" opacity="0.45"/>
+
+  <!-- ═══ UNDERLINE (jagged graffiti bar) ═══ -->
+  <path d="M152 124 L200 128 L240 123 L295 128 L345 121 L400 126 L440 122 L455 126"
+        fill="none" stroke="url(#cyanGrad)" stroke-width="3.5" stroke-linecap="square"
+        filter="url(#glow)" opacity="0.85"/>
+
+  <!-- ═══ TAGLINE ═══ -->
+  <text x="156" y="153"
+        font-family="Impact, 'Arial Black', sans-serif"
+        font-size="13"
+        font-weight="900"
+        letter-spacing="9"
+        fill="url(#cyanGrad)"
+        opacity="0.85"
+        filter="url(#glow)">TWITCH  CHAT  TTS</text>
+
+  <!-- ═══ GRAFFITI DECORATIONS ═══ -->
+
+  <!-- Star burst top-right -->
+  <g transform="translate(520, 22)" filter="url(#glow)">
+    <polygon points="13,0 16,10 26,10 18,16 21,26 13,20 5,26 8,16 0,10 10,10"
+             fill="#ff00ff" opacity="0.85"/>
+    <polygon points="13,4 15,9 20,9 16,12 18,17 13,14 8,17 10,12 6,9 11,9"
+             fill="#ffffff" opacity="0.4"/>
+  </g>
+
+  <!-- Small star top-left of text -->
+  <g transform="translate(138, 22)" filter="url(#glow)">
+    <polygon points="8,0 10,6 16,6 11,10 13,16 8,12 3,16 5,10 0,6 6,6"
+             fill="#00ffee" opacity="0.7"/>
+  </g>
+
+  <!-- Small star near tagline -->
+  <g transform="translate(448, 138)" filter="url(#glow)">
+    <polygon points="6,0 7.5,4.5 12,4.5 8.5,7.5 10,12 6,9 2,12 3.5,7.5 0,4.5 4.5,4.5"
+             fill="#cc00ff" opacity="0.65"/>
+  </g>
+
+  <!-- Graffiti tag / artist mark (rotated, top-left) -->
+  <text x="9" y="17"
+        font-family="Impact, sans-serif"
+        font-size="9"
+        fill="#ff00ff"
+        opacity="0.35"
+        transform="rotate(-18, 9, 17)">w0rxbend</text>
+
+  <!-- ═══ CORNER FRAME (street-art bracket style) ═══ -->
+  <!-- Top-left -->
+  <path d="M6 18 L6 6 L18 6" fill="none" stroke="#ff00ff" stroke-width="3" stroke-linecap="square" opacity="0.7" filter="url(#glow)"/>
+  <!-- Top-right -->
+  <path d="M574 18 L574 6 L562 6" fill="none" stroke="#ff00ff" stroke-width="3" stroke-linecap="square" opacity="0.7" filter="url(#glow)"/>
+  <!-- Bottom-left -->
+  <path d="M6 182 L6 194 L18 194" fill="none" stroke="#00ffee" stroke-width="3" stroke-linecap="square" opacity="0.6" filter="url(#glow)"/>
+  <!-- Bottom-right -->
+  <path d="M574 182 L574 194 L562 194" fill="none" stroke="#00ffee" stroke-width="3" stroke-linecap="square" opacity="0.6" filter="url(#glow)"/>
+
+  <!-- Top partial border lines -->
+  <line x1="22"  y1="6" x2="220" y2="6"  stroke="#7700ff" stroke-width="1.5" opacity="0.45"/>
+  <line x1="370" y1="6" x2="558" y2="6"  stroke="#7700ff" stroke-width="1.5" opacity="0.45"/>
+  <!-- Bottom partial border lines -->
+  <line x1="22"  y1="194" x2="180" y2="194" stroke="#00ffcc" stroke-width="1.5" opacity="0.4"/>
+  <line x1="320" y1="194" x2="558" y2="194" stroke="#00ffcc" stroke-width="1.5" opacity="0.4"/>
 </svg>
