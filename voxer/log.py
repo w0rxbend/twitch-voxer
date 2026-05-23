@@ -2,15 +2,16 @@ import logging
 
 import colorlog
 
+from .config import LOG_LEVEL
 
-def setup_logging(level: int = logging.DEBUG) -> None:
+
+def setup_logging() -> None:
     """Configure coloured logging with timestamp and module names.
 
+    Log level is controlled by the VOXER_LOG_LEVEL environment variable (default: INFO).
     Quiets noisy third-party loggers (websockets, uvicorn, asyncio).
-
-    Args:
-        level: Log level (default: DEBUG).
     """
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
     fmt = colorlog.ColoredFormatter(
         "%(log_color)s%(asctime)s  %(levelname)-8s%(reset)s  "
         "%(cyan)s%(name)-30s%(reset)s %(message)s",

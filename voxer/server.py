@@ -5,6 +5,7 @@ from pathlib import Path
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
@@ -33,22 +34,22 @@ class AudioServer:
         self._app = self._build_app()
 
     def _build_app(self) -> Starlette:
-        async def index(request):
+        async def index(request: Request) -> FileResponse:
             return FileResponse(
                 _STATIC_DIR / "index.html",
                 headers={"Cache-Control": "no-store"},
             )
 
-        async def simple(request):
+        async def simple(request: Request) -> FileResponse:
             return FileResponse(
                 _STATIC_DIR / "simple.html",
                 headers={"Cache-Control": "no-store"},
             )
 
-        async def favicon(request):
+        async def favicon(request: Request) -> Response:
             return Response(content=b"", media_type="image/x-icon")
 
-        async def ws_endpoint(websocket: WebSocket):
+        async def ws_endpoint(websocket: WebSocket) -> None:
             await websocket.accept()
             self._clients.add(websocket)
             LOGGER.info("WebSocket client connected — %d client(s) active", len(self._clients))

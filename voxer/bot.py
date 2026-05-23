@@ -15,7 +15,7 @@ from .events import (
     resub_message,
     sub_message,
 )
-from .handler import MessageHandler, MessageKind, QueuedMessage
+from .handler import MessageKind, QueuedMessage
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -46,18 +46,15 @@ class VoxBot(commands.AutoBot):
         *,
         bot_id: str,
         subs: list[eventsub.SubscriptionPayload],
-        handler: MessageHandler,
-        message_queue: asyncio.Queue,
+        message_queue: asyncio.Queue["QueuedMessage"],
     ) -> None:
         """Initialize the Twitch bot with EventSub subscriptions and message queue.
 
         Args:
             bot_id: Twitch user ID of the bot account.
             subs: List of EventSub subscriptions to register.
-            handler: MessageHandler instance (for type hinting only; not directly used).
-            message_queue: asyncio.Queue for receiving chat messages from event loop.
+            message_queue: Queue for dispatching chat messages to the handler.
         """
-        self._handler = handler
         self._message_queue = message_queue
         super().__init__(
             client_id=CLIENT_ID,

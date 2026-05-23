@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import http.server
+import os
 import secrets
 import time
 import urllib.parse
@@ -8,9 +9,20 @@ import pickledb
 import requests
 from pathlib import Path
 from dotenv import load_dotenv
-from voxer.config import CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN
 
 load_dotenv()
+
+
+def _require_env(key: str) -> str:
+    value = os.environ.get(key)
+    if not value:
+        raise RuntimeError(f"Required environment variable {key!r} is not set")
+    return value
+
+
+CLIENT_ID: str      = _require_env("TWITCH_CLIENT_ID")
+CLIENT_SECRET: str  = _require_env("TWITCH_CLIENT_SECRET")
+REFRESH_TOKEN: str | None = os.environ.get("TWITCH_REFRESH_TOKEN")
 
 BASE_URL = "https://api.twitch.tv/helix"
 REDIRECT_URI = "http://localhost:1337/api/connect/twitch/callback"
@@ -30,6 +42,8 @@ def get_app_token(session: requests.Session) -> str:
 
 
 def refresh_user_token(session: requests.Session) -> str | None:
+    if not REFRESH_TOKEN:
+        return None
     try:
         resp = session.post(
             "https://id.twitch.tv/oauth2/token",
@@ -87,7 +101,7 @@ def oauth_flow(session: requests.Session) -> str:
     server = http.server.HTTPServer(("localhost", 1337), Handler)
     server.timeout = 1  # check for code every second
 
-    print(f"\nOpening browser for Twitch authorization...")
+    print("\nOpening browser for Twitch authorization...")
     print(f"If the browser does not open, visit:\n  {auth_url}\n")
     webbrowser.open(auth_url)
 

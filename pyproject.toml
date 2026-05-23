@@ -1,13 +1,14 @@
 [project]
 name = "twitch-voxer"
 version = "0.1.0"
-description = "Add your description here"
+description = "Twitch chat TTS bot with per-user voice assignment and browser overlay"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "langdetect>=1.0.9",
     "pickledb>=1.6",
     "python-dotenv>=1.1.1",
+    "requests>=2.32",
     "starlette>=1.0.0",
     "twitchio>=3.2.2",
     "supertonic>=1.2.3",
@@ -17,7 +18,8 @@ dependencies = [
 ]
 
 [project.scripts]
-twitch-voxer = "voxer:main"
+twitch-voxer       = "voxer:main"
+voxer-fetch-emotes = "scripts.fetch_emotes:main"
 
 [tool.ruff]
 line-length = 88
@@ -26,7 +28,15 @@ line-length = 88
 quote-style = "double"
 indent-style = "space"
 
+[tool.pyright]
+include           = ["voxer", "scripts", "main.py"]
+pythonVersion     = "3.14"
+typeCheckingMode  = "standard"
+
 [dependency-groups]
 dev = [
+    "pyright>=1.1",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
     "ruff>=0.15.13",
 ]

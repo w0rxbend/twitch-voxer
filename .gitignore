@@ -14,5 +14,5 @@ wheels/
 *.wav
 
 .tio.tokens.json
-audio/
-data/
+data/audio/
+emotes/emotes.db

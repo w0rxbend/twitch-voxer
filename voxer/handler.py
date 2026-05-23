@@ -5,6 +5,7 @@ import re
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -18,7 +19,6 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 _BUILTIN_VOICES: list[str] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
 DEFAULT_LANG: str = "uk"
-_ANNOUNCE_WINDOW_SECS: int = 300  # 5 minutes
 
 _KNOWN_BOTS: frozenset[str] = frozenset({
     "streamelements",
@@ -185,7 +185,6 @@ def _build_abbrev_re(abbrevs: dict[str, str]) -> re.Pattern:
 _ABBREV_RE_EN: re.Pattern = _build_abbrev_re(_ABBREVS_EN)
 _ABBREV_RE_UK: re.Pattern = _build_abbrev_re(_ABBREVS_UK)
 
-
 _TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72"
 
 
@@ -228,7 +227,6 @@ class QueuedMessage:
     emote_names: list[str] = field(default_factory=list)
 
 
-
 def _is_bot(username: str) -> bool:
     lower = username.lower()
     return lower in _KNOWN_BOTS or "bot" in lower
@@ -259,12 +257,13 @@ class MessageHandler:
         tts: TTSService,
         db_path: str,
         audio_dir: Path,
-        broadcast,
-        message_queue: asyncio.Queue,
+        broadcast: Callable[[BroadcastEvent], Awaitable[None]],
+        message_queue: asyncio.Queue["QueuedMessage"],
         emotes_db_path: str | None = None,
         emote_sound_paths: list[str] | None = None,
-        timestamps_db_path: str = "timestamps.json",
+        timestamps_db_path: str = "data/timestamps.json",
         no_announce_users: frozenset[str] | None = None,
+        announce_window_secs: int = 300,
     ) -> None:
         """Initialize message handler with TTS service and database.
 
@@ -272,11 +271,13 @@ class MessageHandler:
             tts: TTSService instance for voice synthesis.
             db_path: Path to pickledb file storing username → voice assignments.
             audio_dir: Directory for storing generated MP3 files.
-            broadcast: Async function to broadcast audio via WebSocket to connected clients.
-            message_queue: asyncio.Queue for receiving messages from the bot.
+            broadcast: Async callable to broadcast audio via WebSocket to connected clients.
+            message_queue: Queue for receiving messages from the bot.
             emotes_db_path: Optional path to pickledb file storing emote name → image URLs.
             emote_sound_paths: MP3 files to pick from randomly for emote-only messages.
             timestamps_db_path: Path to pickledb file storing username → last-message timestamp.
+            no_announce_users: Usernames that never get the announcement prefix.
+            announce_window_secs: Seconds of silence before re-announcing a user's name.
         """
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
@@ -287,41 +288,54 @@ class MessageHandler:
         self._audio_dir = audio_dir
         self._broadcast = broadcast
         self._message_queue = message_queue
-        self._emotes: dict[str, dict] = self._load_emotes(emotes_db_path)
+        self._emotes_db_path = emotes_db_path
+        self._emotes: dict[str, dict] = {}
         self._emote_sounds: list[Path] = [
             p for raw in (emote_sound_paths or []) if (p := Path(raw)).exists()
         ]
         self._no_announce_users: frozenset[str] = no_announce_users or frozenset()
+        self._announce_window_secs = announce_window_secs
+        self._voice_lock = asyncio.Lock()
+        self._ts_lock = asyncio.Lock()
         LOGGER.info("MessageHandler ready")
 
-    @staticmethod
-    def _load_emotes(path: str | None) -> dict[str, dict]:
-        if not path:
-            return {}
+    async def ainit(self) -> None:
+        """Load async resources (emotes DB) that cannot be awaited in __init__."""
+        if self._emotes_db_path:
+            self._emotes = await self._load_emotes(self._emotes_db_path)
+
+    async def _load_emotes(self, path: str) -> dict[str, dict]:
         try:
-            import json
-            data = json.loads(Path(path).read_bytes())
-            LOGGER.info("Loaded %d emotes from %s", len(data), path)
-            return data
-        except (FileNotFoundError, ValueError) as exc:
+            db = pickledb.PickleDB(path)
+            await db.load()
+            keys: list[str] = await db.all()
+            emotes: dict[str, dict] = {}
+            for key in keys:
+                value = await db.get(key)
+                if value is not None:
+                    emotes[key] = value
+            LOGGER.info("Loaded %d emotes from %s", len(emotes), path)
+            return emotes
+        except (FileNotFoundError, ValueError, OSError) as exc:
             LOGGER.warning("Could not load emotes DB (%s): %s", path, exc)
             return {}
 
     async def _get_or_assign_voice(self, username: str) -> str:
-        await self._db.load()
-        voice = await self._db.get(username)
-        if not voice:
-            voice = random.choice(self._voices)
-            await self._db.set(username, voice)
-            LOGGER.info("New chatter %s — assigned voice %s", username, voice)
-            await self._db.save()
-        else:
-            LOGGER.debug("Voice for %s: %s", username, voice)
+        async with self._voice_lock:
+            await self._db.load()
+            voice = await self._db.get(username)
+            if not voice:
+                voice = random.choice(self._voices)
+                await self._db.set(username, voice)
+                LOGGER.info("New chatter %s — assigned voice %s", username, voice)
+                await self._db.save()
+            else:
+                LOGGER.debug("Voice for %s: %s", username, voice)
         return voice
 
     async def _detect_lang(self, text: str) -> str:
         try:
-            lang = detect(text)
+            lang = await asyncio.to_thread(detect, text)
             resolved = lang if lang in _ANNOUNCEMENTS else DEFAULT_LANG
             LOGGER.debug("Detected lang: %s -> %s", lang, resolved)
             return resolved
@@ -330,83 +344,37 @@ class MessageHandler:
             return DEFAULT_LANG
 
     async def _should_announce(self, username: str) -> bool:
-        """Return True if more than _ANNOUNCE_WINDOW_SECS have passed since the user's last message."""
+        """Return True if more than announce_window_secs have passed since the user's last message."""
         await self._ts_db.load()
         last = await self._ts_db.get(username)
         if not last:
             return True
-        return (time.time() - float(last)) > _ANNOUNCE_WINDOW_SECS
+        return (time.time() - float(last)) > self._announce_window_secs
 
     async def _record_message(self, username: str) -> None:
         """Persist the current timestamp as the user's last-message time."""
         await self._ts_db.set(username, str(time.time()))
         await self._ts_db.save()
 
-    async def handle(self, message: QueuedMessage) -> None:
-        """Process a queued message via TTS and broadcast to connected clients.
-
-        Dispatches on message.kind:
-          - USER: applies bot filtering, language detection, persistent voice assignment,
-            text normalisation, and the "username says:" announcement prefix.
-          - SYSTEM: speaks text directly with a random voice in Ukrainian — used for
-            channel events (follow, sub, raid, cheer, etc.).
-
-        Args:
-            message: The queued message to process.
-        """
-        emoji_items: list[EmoteItem] = []
-
-        if message.kind is MessageKind.SYSTEM:
-            LOGGER.info("Announcing system event for %s", message.username)
-            voice = random.choice(self._voices)
-            final_text = message.text
-            lang = "uk"
-        else:
-            if _is_bot(message.username):
-                LOGGER.info("Skipping bot account: %s", message.username)
-                return
-            LOGGER.info("Handling message from %s", message.username)
-            clean_text, emoji_items = _extract_emojis(message.text)
-
-            if not clean_text.strip():
-                twitch_emote_items = [
-                    EmoteItem(name=name, url=self._emotes[name]["url_2x"])
-                    for name in message.emote_names
-                    if name in self._emotes
-                ]
-                all_emotes = twitch_emote_items + emoji_items
-                if all_emotes and self._emote_sounds:
-                    sound = random.choice(self._emote_sounds)
-                    LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
-                    mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
-                    shutil.copy2(sound, mp3_path)
-                    await self._broadcast(BroadcastEvent(
-                        audio_url=f"/audio/{mp3_path.name}",
-                        username=message.username,
-                        emotes=all_emotes,
-                    ))
-                else:
-                    LOGGER.info("Skipping emote-only from %s", message.username)
-                return
-
-            lang = await self._detect_lang(clean_text)
-            voice = await self._get_or_assign_voice(message.username)
-            normalized = _normalize(clean_text, lang)
-            if message.username.lower() not in self._no_announce_users and await self._should_announce(message.username):
-                final_text = _ANNOUNCEMENTS[lang].format(username=message.username, text=normalized)
-                LOGGER.debug("Announcing prefix for %s (outside window)", message.username)
-            else:
-                final_text = normalized
-            await self._record_message(message.username)
-
+    async def _synthesize_and_broadcast(
+        self,
+        username: str,
+        final_text: str,
+        voice: str,
+        lang: str,
+        emote_names: list[str],
+        emoji_items: list[EmoteItem],
+    ) -> None:
         twitch_emote_items = [
             EmoteItem(name=name, url=self._emotes[name]["url_2x"])
-            for name in message.emote_names
+            for name in emote_names
             if name in self._emotes
         ]
         all_emotes = twitch_emote_items + emoji_items
 
-        wav_path = self._tts.save_wav(final_text, voice_name=voice, lang=lang)
+        wav_path = await asyncio.to_thread(
+            self._tts.save_wav, final_text, voice_name=voice, lang=lang
+        )
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
         try:
             await self._tts.to_mp3(wav_path, mp3_path)
@@ -415,20 +383,100 @@ class MessageHandler:
 
         event = BroadcastEvent(
             audio_url=f"/audio/{mp3_path.name}",
-            username=message.username,
+            username=username,
             emotes=all_emotes,
         )
-        LOGGER.info("Broadcasting audio for %s -> %s (emotes: %s)", message.username, mp3_path.name, [e.name for e in all_emotes])
+        LOGGER.info(
+            "Broadcasting audio for %s -> %s (emotes: %s)",
+            username,
+            mp3_path.name,
+            [e.name for e in all_emotes],
+        )
         await self._broadcast(event)
+
+    async def _handle_system(self, message: QueuedMessage) -> None:
+        LOGGER.info("Announcing system event for %s", message.username)
+        voice = random.choice(self._voices)
+        await self._synthesize_and_broadcast(
+            message.username, message.text, voice, "uk", message.emote_names, []
+        )
+
+    async def _handle_user(self, message: QueuedMessage) -> None:
+        if _is_bot(message.username):
+            LOGGER.info("Skipping bot account: %s", message.username)
+            return
+        LOGGER.info("Handling message from %s", message.username)
+        clean_text, emoji_items = _extract_emojis(message.text)
+
+        if not clean_text.strip():
+            twitch_emote_items = [
+                EmoteItem(name=name, url=self._emotes[name]["url_2x"])
+                for name in message.emote_names
+                if name in self._emotes
+            ]
+            all_emotes = twitch_emote_items + emoji_items
+            if all_emotes and self._emote_sounds:
+                sound = random.choice(self._emote_sounds)
+                LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
+                mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
+                shutil.copy2(sound, mp3_path)
+                await self._broadcast(BroadcastEvent(
+                    audio_url=f"/audio/{mp3_path.name}",
+                    username=message.username,
+                    emotes=all_emotes,
+                ))
+            else:
+                LOGGER.info("Skipping emote-only from %s", message.username)
+            return
+
+        lang = await self._detect_lang(clean_text)
+        voice = await self._get_or_assign_voice(message.username)
+        normalized = _normalize(clean_text, lang)
+
+        async with self._ts_lock:
+            if (
+                message.username.lower() not in self._no_announce_users
+                and await self._should_announce(message.username)
+            ):
+                final_text = _ANNOUNCEMENTS[lang].format(
+                    username=message.username, text=normalized
+                )
+                LOGGER.debug("Announcing prefix for %s (outside window)", message.username)
+            else:
+                final_text = normalized
+            await self._record_message(message.username)
+
+        await self._synthesize_and_broadcast(
+            message.username, final_text, voice, lang, message.emote_names, emoji_items
+        )
+
+    async def handle(self, message: QueuedMessage) -> None:
+        """Process a queued message via TTS and broadcast to connected clients.
+
+        Dispatches on message.kind:
+          - SYSTEM: speaks text directly with a random voice in Ukrainian — used for
+            channel events (follow, sub, raid, cheer, etc.).
+          - USER: applies bot filtering, language detection, persistent voice assignment,
+            text normalisation, and the "username says:" announcement prefix.
+
+        Args:
+            message: The queued message to process.
+        """
+        if message.kind is MessageKind.SYSTEM:
+            await self._handle_system(message)
+        else:
+            await self._handle_user(message)
 
     async def process_queue(self) -> None:
         """Continuously drain the message queue, invoking handle() for each QueuedMessage."""
         while True:
+            msg: QueuedMessage = await self._message_queue.get()
             try:
-                msg: QueuedMessage = await self._message_queue.get()
-                LOGGER.debug("Processing queued message from %s (%s)", msg.username, msg.kind.name)
+                LOGGER.debug(
+                    "Processing queued message from %s (%s)", msg.username, msg.kind.name
+                )
                 await self.handle(msg)
-            except Exception as exc:
-                LOGGER.error("Error processing message: %s", exc)
+            except Exception:
+                LOGGER.exception("Error processing message from %s", msg.username)
             finally:
                 self._message_queue.task_done()

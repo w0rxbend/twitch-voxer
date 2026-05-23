@@ -6,11 +6,12 @@ from twitchio import eventsub
 
 from .bot import VoxBot, get_user_id
 from .config import (
-    ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, EMOTE_SOUND_PATHS, EMOTES_DB_PATH,
-    MESSAGES_PATH, NO_ANNOUNCE_USERS, REFRESH_TOKEN, SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL,
-    SERVER_HOST, SERVER_PORT, TIMESTAMPS_DB_PATH, VOICES_DIR,
+    ACCESS_TOKEN, ANNOUNCE_WINDOW_SECS, AUDIO_DIR, BOT_USERNAME, DB_PATH,
+    EMOTE_SOUND_PATHS, EMOTES_DB_PATH, MESSAGES_PATH, NO_ANNOUNCE_USERS,
+    REFRESH_TOKEN, SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL, SERVER_HOST,
+    SERVER_PORT, TIMESTAMPS_DB_PATH, VOICES_DIR,
 )
-from .handler import MessageHandler
+from .handler import MessageHandler, QueuedMessage
 from .log import setup_logging
 from .scheduler import Scheduler
 from .server import AudioServer
@@ -31,7 +32,7 @@ async def run() -> None:
     audio_dir.mkdir(exist_ok=True)
     LOGGER.info("Audio dir: %s", audio_dir.resolve())
 
-    message_queue: asyncio.Queue = asyncio.Queue()
+    message_queue: asyncio.Queue[QueuedMessage] = asyncio.Queue()
 
     tts = TTSService(voices_dir=Path(VOICES_DIR))
     server = AudioServer(audio_dir=audio_dir, host=SERVER_HOST, port=SERVER_PORT)
@@ -45,7 +46,9 @@ async def run() -> None:
         emote_sound_paths=EMOTE_SOUND_PATHS,
         timestamps_db_path=TIMESTAMPS_DB_PATH,
         no_announce_users=NO_ANNOUNCE_USERS,
+        announce_window_secs=ANNOUNCE_WINDOW_SECS,
     )
+    await handler.ainit()
 
     bot_id = await get_user_id(BOT_USERNAME)
     subs: list[eventsub.SubscriptionPayload] = [
@@ -53,7 +56,7 @@ async def run() -> None:
     ]
     LOGGER.info("Bot user ID: %s", bot_id)
 
-    async with VoxBot(bot_id=bot_id, subs=subs, handler=handler, message_queue=message_queue) as bot:
+    async with VoxBot(bot_id=bot_id, subs=subs, message_queue=message_queue) as bot:
         await bot.add_token(ACCESS_TOKEN, REFRESH_TOKEN)
         scheduler = Scheduler(
             send_chat=bot.send_chat,
