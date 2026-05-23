@@ -11,12 +11,38 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 class TTSService:
-    def __init__(self) -> None:
-        """Initialize the TTS engine and prepare the voice style cache."""
+    def __init__(self, voices_dir: Path | None = None) -> None:
+        """Initialize the TTS engine and prepare the voice style cache.
+
+        Args:
+            voices_dir: Optional directory of custom voice JSON files to preload.
+        """
         LOGGER.debug("Initialising TTS engine...")
         self._tts = TTS(auto_download=True)
         self._voice_cache: dict[str, object] = {}
+        self._custom_voice_names: list[str] = []
+        if voices_dir is not None:
+            self._load_custom_voices(voices_dir)
         LOGGER.info("TTS engine ready")
+
+    def _load_custom_voices(self, voices_dir: Path) -> None:
+        LOGGER.info("Loading custom voices from: %s", voices_dir.resolve())
+        for json_file in sorted(voices_dir.glob("*.json")):
+            name = json_file.stem
+            try:
+                self._voice_cache[name] = self._tts.get_voice_style_from_path(json_file)
+                LOGGER.info("Custom voice loaded: %s (%s)", name, json_file.resolve())
+                self._custom_voice_names.append(name)
+                LOGGER.info("Loaded custom voice: %s", name)
+            except Exception as exc:
+                LOGGER.warning("Failed to load custom voice %s: %s", name, exc)
+        
+
+    @property
+    def custom_voice_names(self) -> list[str]:
+        """Names of successfully loaded custom voices."""
+
+        return list(self._custom_voice_names)
 
     def _voice_style(self, voice_name: str) -> object:
         if voice_name not in self._voice_cache:

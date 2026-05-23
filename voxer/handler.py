@@ -13,7 +13,7 @@ from .tts import TTSService
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
-VOICES: list[str] = ["M1", "M2", "M3", "F1", "F2", "F3"]
+_BUILTIN_VOICES: list[str] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
 DEFAULT_LANG: str = "uk"
 
 _KNOWN_BOTS: frozenset[str] = frozenset({
@@ -240,6 +240,8 @@ class MessageHandler:
         """
         LOGGER.debug("Initialising MessageHandler (db=%s, audio_dir=%s)", db_path, audio_dir)
         self._tts = tts
+        self._voices: list[str] = _BUILTIN_VOICES + tts.custom_voice_names
+        LOGGER.info("Voice pool (%d): %s", len(self._voices), self._voices)
         self._db = pickledb.PickleDB(db_path)
         self._audio_dir = audio_dir
         self._broadcast = broadcast
@@ -250,7 +252,7 @@ class MessageHandler:
         await self._db.load()
         voice = await self._db.get(username)
         if not voice:
-            voice = random.choice(VOICES)
+            voice = random.choice(self._voices)
             await self._db.set(username, voice)
             LOGGER.info("New chatter %s — assigned voice %s", username, voice)
             await self._db.save()
@@ -282,7 +284,7 @@ class MessageHandler:
         """
         if message.kind is MessageKind.SYSTEM:
             LOGGER.info("Announcing system event for %s", message.username)
-            voice = random.choice(VOICES)
+            voice = random.choice(self._voices)
             announced = message.text
             lang = "uk"
         else:

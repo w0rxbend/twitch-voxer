@@ -8,7 +8,7 @@ from .bot import VoxBot, get_user_id
 from .config import (
     ACCESS_TOKEN, AUDIO_DIR, BOT_USERNAME, DB_PATH, MESSAGES_PATH, REFRESH_TOKEN,
     SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL,
-    SERVER_HOST, SERVER_PORT,
+    SERVER_HOST, SERVER_PORT, VOICES_DIR,
 )
 from .handler import MessageHandler
 from .log import setup_logging
@@ -33,7 +33,7 @@ async def run() -> None:
 
     message_queue: asyncio.Queue = asyncio.Queue()
 
-    tts = TTSService()
+    tts = TTSService(voices_dir=Path(VOICES_DIR))
     server = AudioServer(audio_dir=audio_dir, host=SERVER_HOST, port=SERVER_PORT)
     handler = MessageHandler(
         tts=tts,
