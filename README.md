@@ -2,7 +2,7 @@
 
 ![twitch-voxer logo](logo.svg)
 
-A self-hosted Twitch chat Text-to-Speech bot that streams synthesised audio to an OBS browser source via WebSocket. Every chat message is announced in the detected language, each chatter is automatically assigned a persistent voice, bots and links are handled gracefully, and a scheduler posts rotating community messages to chat on a configurable interval.
+A self-hosted Twitch chat Text-to-Speech bot that streams synthesised audio to an OBS browser source via WebSocket. Every chat message is announced in the detected language, each chatter is automatically assigned a persistent voice, bots and links are handled gracefully, and a scheduler posts random weighted community messages to chat.
 
 ---
 
@@ -47,7 +47,7 @@ See [Getting Twitch Credentials](#getting-twitch-credentials) if you don't have 
 - **Bot filtering** — well-known bot accounts (StreamElements, Nightbot, Moobot, …) and any username containing "bot" are silently skipped.
 - **WebSocket audio streaming** — the synthesised MP3 is served over HTTP and pushed to connected browser clients via WebSocket. Audio files are deleted server-side as soon as the client confirms playback is complete.
 - **OBS browser source** — the built-in transparent page auto-connects, queues audio, and plays it sequentially with exponential-backoff reconnection (no user interaction required; OBS CEF bypasses autoplay restrictions).
-- **Scheduled messages** — posts rotating messages to chat every N seconds (configurable). Messages are read from `data/messages.json` at runtime — no restart needed to add or remove entries.
+- **Scheduled messages** — posts random weighted messages to chat. Messages and per-hour frequencies are read from `data/messages.json` at runtime — no restart needed to add or remove entries.
 - **Colourful logging** — structured, colour-coded terminal output via `colorlog`.
 
 ---
@@ -174,14 +174,19 @@ TWITCH_BOT_USERNAME=your_bot_account_login
 
 `voices.json` is created automatically on first run.
 
-Create `data/messages.json` with the messages the scheduler will rotate through:
+Create `data/messages.json` with the messages the scheduler will randomly post:
 
 ```json
 {
   "messages": [
-    "Welcome to the stream! 👋",
-    "Don't forget to join the Discord — link in the chat!",
-    "Follow the channel and enable notifications so you never miss a stream! 🔔"
+    {
+      "text": "Welcome to the stream! 👋",
+      "frequency_per_hour": 1
+    },
+    {
+      "text": "Time for a stretch break.",
+      "frequency_per_hour": 0.5
+    }
   ]
 }
 ```
@@ -250,7 +255,7 @@ The container exposes port **8080**.
 | `VOXER_AUDIO_DIR` | `audio` | Directory where MP3 files are temporarily stored |
 | `VOXER_SERVER_HOST` | `0.0.0.0` | Host the HTTP/WebSocket server binds to |
 | `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
-| `VOXER_SCHEDULER_INTERVAL` | `600` | Seconds between scheduled messages |
+| `VOXER_SCHEDULER_INTERVAL` | `600` | Fallback retry delay when no scheduled messages are available |
 | `VOXER_SCHEDULER_INITIAL_DELAY` | `10` | Seconds to wait before the first scheduled message |
 
 ---
@@ -262,14 +267,19 @@ Edit `data/messages.json` at any time — the scheduler reloads the file on ever
 ```json
 {
   "messages": [
-    "First message",
-    "Second message",
-    "Third message"
+    {
+      "text": "First message",
+      "frequency_per_hour": 1
+    },
+    {
+      "text": "Stretch and drink water.",
+      "frequency_per_hour": 0.5
+    }
   ]
 }
 ```
 
-Messages are posted to chat in round-robin order. They are **not** read aloud via TTS — only sent as chat text.
+Messages are posted to chat randomly, weighted by `frequency_per_hour`. A value of `1` means roughly once per hour; `0.5` means roughly once every two hours. They are **not** read aloud via TTS — only sent as chat text.
 
 ---
 

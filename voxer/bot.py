@@ -186,7 +186,7 @@ class VoxBot(commands.AutoBot):
     async def send_chat(self, text: str) -> None:
         """Send a message to the bot's own Twitch channel.
 
-        Used by the Scheduler to post rotating community messages.
+        Used by the Scheduler to post scheduled community messages.
         Creates a PartialUser from the bot's own ID so no broadcaster token
         is needed — only the bot's chat:edit scope.
 

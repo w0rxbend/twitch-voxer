@@ -56,7 +56,7 @@ SERVER_PORT: int = int(os.getenv("VOXER_SERVER_PORT", "8080"))
 # How long to wait before sending the first scheduled message (lets the bot
 # finish its EventSub handshake before posting to chat).
 SCHEDULER_INITIAL_DELAY: int = int(os.getenv("VOXER_SCHEDULER_INITIAL_DELAY", "10"))
-# Gap between consecutive scheduled messages in seconds (default: 10 min).
+# Fallback retry delay when no scheduled messages are available.
 SCHEDULER_INTERVAL: int      = int(os.getenv("VOXER_SCHEDULER_INTERVAL", "600"))
 
 # ── Announcement behaviour ────────────────────────────────────────────────────

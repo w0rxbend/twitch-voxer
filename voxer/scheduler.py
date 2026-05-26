@@ -1,26 +1,32 @@
 """Periodic chat message scheduler.
 
-Posts rotating messages to Twitch chat on a fixed interval without TTS.
-Messages are read from a pickledb file on every cycle, so the list can be
-edited at runtime without restarting the bot.
-
-Round-robin selection: an internal counter is incremented after each post
-and the message is picked by `counter % len(messages)`, ensuring even
-distribution across all entries regardless of how many are in the list.
+Posts random messages to Twitch chat without TTS. Messages are read from a
+pickledb file on every cycle, so the list can be edited at runtime without
+restarting the bot.
 """
 
 import asyncio
 import logging
+import random
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import pickledb
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
+SECONDS_PER_HOUR = 3600.0
+DEFAULT_FREQUENCY_PER_HOUR = 1.0
+
+
+@dataclass(frozen=True)
+class ScheduledMessage:
+    text: str
+    frequency_per_hour: float
 
 
 class Scheduler:
-    """Posts rotating messages to Twitch chat at a configurable interval."""
+    """Posts random scheduled messages to Twitch chat."""
 
     def __init__(
         self,
@@ -35,8 +41,8 @@ class Scheduler:
             send_chat: Async callable that posts a message to Twitch chat.
                        Typically VoxBot.send_chat — injected to avoid circular imports.
             messages_path: Path to pickledb JSON file with a "messages" key containing
-                           a list of strings to rotate through.
-            interval: Seconds between scheduled messages (default: 600 = 10 min).
+                           message objects with text and frequency_per_hour.
+            interval: Fallback retry delay when no messages are available.
             initial_delay: Seconds to wait before the first message (default: 10).
                            Gives the EventSub connection time to establish before posting.
         """
@@ -44,10 +50,42 @@ class Scheduler:
         self._db = pickledb.PickleDB(str(messages_path))
         self._interval = interval
         self._initial_delay = initial_delay
-        # Position in the round-robin rotation; wraps via modulo on each use
-        self._index = 0
+        self._sent_count = 0
 
-    async def _load_messages(self) -> list[str]:
+    def _parse_message(self, raw: Any, index: int) -> ScheduledMessage | None:
+        if isinstance(raw, str):
+            return ScheduledMessage(raw, DEFAULT_FREQUENCY_PER_HOUR)
+
+        if not isinstance(raw, dict):
+            LOGGER.warning("Skipping scheduled message %d: expected string or object", index)
+            return None
+
+        text = raw.get("text")
+        if not isinstance(text, str) or not text.strip():
+            LOGGER.warning("Skipping scheduled message %d: missing text", index)
+            return None
+
+        frequency = raw.get("frequency_per_hour", DEFAULT_FREQUENCY_PER_HOUR)
+        try:
+            frequency_per_hour = float(frequency)
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "Skipping scheduled message %d: invalid frequency_per_hour=%r",
+                index,
+                frequency,
+            )
+            return None
+
+        if frequency_per_hour <= 0:
+            LOGGER.warning(
+                "Skipping scheduled message %d: frequency_per_hour must be positive",
+                index,
+            )
+            return None
+
+        return ScheduledMessage(text.strip(), frequency_per_hour)
+
+    async def _load_messages(self) -> list[ScheduledMessage]:
         """Load the current message list from the DB file.
 
         Re-reads the file on every call so edits to data/messages.json take effect
@@ -60,20 +98,40 @@ class Scheduler:
             if not messages:
                 LOGGER.warning("No messages found in DB")
                 return []
-            return messages
+            if not isinstance(messages, list):
+                LOGGER.warning("Messages DB key must contain a list")
+                return []
+            parsed = [
+                message
+                for index, raw in enumerate(messages, start=1)
+                if (message := self._parse_message(raw, index)) is not None
+            ]
+            if not parsed:
+                LOGGER.warning("No valid scheduled messages found in DB")
+            return parsed
         except Exception as exc:
             LOGGER.error("Failed to load messages: %s", exc)
             return []
 
+    def _choose_message(self, messages: list[ScheduledMessage]) -> ScheduledMessage:
+        weights = [message.frequency_per_hour for message in messages]
+        return random.choices(messages, weights=weights, k=1)[0]
+
+    def _delay_for(self, messages: list[ScheduledMessage]) -> float:
+        total_frequency_per_hour = sum(message.frequency_per_hour for message in messages)
+        if total_frequency_per_hour <= 0:
+            return float(self._interval)
+        return SECONDS_PER_HOUR / total_frequency_per_hour
+
     async def run(self) -> None:
-        """Continuously post scheduled messages to chat at the configured interval.
+        """Continuously post random scheduled messages to chat.
 
         Runs as one of the four concurrent tasks started by asyncio.gather() in __init__.py.
         The initial_delay gives the bot time to finish the EventSub handshake and token
         validation before attempting to post chat messages.
         """
         LOGGER.info(
-            "Scheduler ready — first message in %ds, then every %ds",
+            "Scheduler ready — first message in %ds, fallback retry every %ds",
             self._initial_delay,
             self._interval,
         )
@@ -81,10 +139,17 @@ class Scheduler:
         while True:
             messages = await self._load_messages()
             if messages:
-                # Modulo wraps the counter back to 0 when it exceeds the list length,
-                # producing a seamless round-robin even if the list changes size between cycles.
-                text = messages[self._index % len(messages)]
-                self._index += 1
-                LOGGER.info("Posting scheduled message %d: %r", self._index, text[:60])
-                await self._send_chat(text)
-            await asyncio.sleep(self._interval)
+                message = self._choose_message(messages)
+                self._sent_count += 1
+                delay = self._delay_for(messages)
+                LOGGER.info(
+                    "Posting scheduled message %d (%.2f/hour, next in %.0fs): %r",
+                    self._sent_count,
+                    message.frequency_per_hour,
+                    delay,
+                    message.text[:60],
+                )
+                await self._send_chat(message.text)
+            else:
+                delay = float(self._interval)
+            await asyncio.sleep(delay)

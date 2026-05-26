@@ -21,7 +21,7 @@ graph TD
         MH[MessageHandler<br/>handler.py<br/>lang detect · voice assign · normalise]
         TTS[TTSService<br/>tts.py<br/>Supertonic WAV → ffmpeg MP3]
         SRV[AudioServer<br/>server.py<br/>Starlette HTTP + WebSocket]
-        SCH[Scheduler<br/>scheduler.py<br/>rotating chat messages]
+        SCH[Scheduler<br/>scheduler.py<br/>weighted random chat messages]
         CFG[config.py<br/>env vars]
         LOG[log.py<br/>colorlog]
     end
@@ -222,8 +222,8 @@ graph LR
 
 ## Scheduler
 
-Posts rotating messages to Twitch chat on a fixed interval.  
-The DB is re-read every cycle so messages can be updated without a restart.
+Posts random weighted messages to Twitch chat.  
+The DB is re-read every cycle so messages and frequencies can be updated without a restart.
 
 ```mermaid
 sequenceDiagram
@@ -232,13 +232,12 @@ sequenceDiagram
     participant BOT as VoxBot.send_chat
 
     SCH->>SCH: sleep(initial_delay)
-    loop every interval seconds
+    loop frequency-derived delay
         SCH->>DB: load() + get("messages")
-        DB-->>SCH: list[str]
-        SCH->>SCH: text = messages[index % len]
-        SCH->>SCH: index += 1
+        DB-->>SCH: list[{text, frequency_per_hour}]
+        SCH->>SCH: random weighted choice
         SCH->>BOT: send_chat(text)
-        SCH->>SCH: sleep(interval)
+        SCH->>SCH: sleep(3600 / total_frequency)
     end
 ```
 
@@ -254,5 +253,5 @@ sequenceDiagram
 | Separate `preload_resources()` method on `MessageHandler` | `async def __init__` is not valid Python; `preload_resources()` handles the async emotes-DB load that must happen before messages are processed. |
 | Audio file deleted by the browser client | The server cannot know when the browser finishes playing; the client sends a `{done: filename}` WS message after the `<audio>` element fires `ended`, then the server unlinks the file. |
 | Path traversal check before unlink | `path.parent == self._audio_dir.resolve()` prevents a malicious WS message from deleting arbitrary files on the server. |
-| data/messages.json reloaded every scheduler cycle | Allows live edits without restarting the bot; the DB read is cheap. |
+| data/messages.json reloaded every scheduler cycle | Allows live edits to messages and frequencies without restarting the bot; the DB read is cheap. |
 | Longest abbreviation first in regex alternation | Without longest-first ordering, shorter prefixes (`gg`) would match before longer keys (`ggwp`), producing wrong expansions. |
