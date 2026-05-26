@@ -1,3 +1,21 @@
+"""Twitch adapter layer for twitch-voxer.
+
+VoxBot subclasses twitchio's AutoBot which handles:
+  - EventSub WebSocket connection management
+  - Automatic token refresh
+  - Command prefix routing (prefix="!")
+
+This module is intentionally thin: it translates raw Twitch events into
+QueuedMessages and drops them onto the shared asyncio.Queue.  All business
+logic (voice selection, TTS synthesis, language detection) lives in handler.py.
+
+Subscriptions are registered in two places:
+  - __init__: the initial ChatMessageSubscription for the bot's own channel,
+    required for the EventSub handshake before any user authenticates.
+  - event_oauth_authorized: per-broadcaster subscriptions added after a user
+    completes the OAuth flow via the twitchio built-in /oauth/authorize route.
+"""
+
 import asyncio
 import logging
 
@@ -23,8 +41,11 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 async def get_user_id(username: str) -> str:
     """Fetch Twitch user ID by login name.
 
+    Opens a short-lived API client, makes one GET /users call, then closes.
+    Called once at startup to resolve BOT_USERNAME → numeric ID.
+
     Args:
-        username: Twitch login name.
+        username: Twitch login name (slug, not display name).
 
     Returns:
         User ID string.
@@ -41,6 +62,12 @@ async def get_user_id(username: str) -> str:
 
 
 class VoxBot(commands.AutoBot):
+    """Twitch EventSub bot that feeds chat events into the TTS message queue.
+
+    Inherits from AutoBot which manages the EventSub WebSocket, token storage,
+    and built-in OAuth flow at /oauth/authorize.
+    """
+
     def __init__(
         self,
         *,
@@ -52,7 +79,7 @@ class VoxBot(commands.AutoBot):
 
         Args:
             bot_id: Twitch user ID of the bot account.
-            subs: List of EventSub subscriptions to register.
+            subs: List of EventSub subscriptions to register at connection time.
             message_queue: Queue for dispatching chat messages to the handler.
         """
         self._message_queue = message_queue
@@ -61,21 +88,27 @@ class VoxBot(commands.AutoBot):
             client_secret=CLIENT_SECRET,
             bot_id=bot_id,
             owner_id=bot_id,
-            prefix="!",
+            prefix="!",           # command prefix (no chat commands are defined yet)
             subscriptions=subs,
-            force_subscribe=True,
+            force_subscribe=True,  # re-subscribe even if already active on Twitch's side
         )
 
     async def event_message(self, payload: ChatMessage) -> None:
         """Handle incoming Twitch chat message by enqueuing it for TTS processing.
 
+        Twitch delivers each message as a list of typed fragments.
+        We split them into:
+          - text fragments  → joined into a single string for TTS
+          - emote fragments → collected as names for image overlay lookup
+
         Args:
             payload: Chat message event from EventSub.
         """
-
+        # Join text fragments (skip emote/cheermote fragments — those are handled separately)
         tts_text = " ".join(
             fragment.text for fragment in payload.fragments if fragment.type == "text"
         ).strip()
+        # Collect emote names so the overlay can display their images
         emote_names = [
             fragment.text for fragment in payload.fragments if fragment.type == "emote"
         ]
@@ -83,15 +116,23 @@ class VoxBot(commands.AutoBot):
         await self._message_queue.put(
             QueuedMessage(username=payload.chatter.name, text=tts_text, emote_names=emote_names)
         )
+        # Call super() so twitchio can route any "!" prefixed commands
         await super().event_message(payload)
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:
         """Handle OAuth token authorization and subscribe to chat and channel events.
 
+        Fires when a broadcaster visits the twitchio built-in OAuth callback URL.
+        We register all per-broadcaster EventSub subscriptions here because we
+        now have the broadcaster's user_id from the validated token.
+
         Args:
-            payload: OAuth authorization payload from EventSub.
+            payload: OAuth authorization payload with user_id and tokens.
         """
         await self.add_token(payload.access_token, payload.refresh_token)
+
+        # Full set of per-broadcaster subscriptions.
+        # Each maps to a VoxBot.event_* handler below.
         subs: list[eventsub.SubscriptionPayload] = [
             eventsub.ChatMessageSubscription(
                 broadcaster_user_id=payload.user_id,
@@ -99,7 +140,7 @@ class VoxBot(commands.AutoBot):
             ),
             eventsub.ChannelFollowSubscription(
                 broadcaster_user_id=payload.user_id,
-                moderator_user_id=self.bot_id,
+                moderator_user_id=self.bot_id,  # follow events require a moderator ID
             ),
             eventsub.ChannelSubscribeSubscription(
                 broadcaster_user_id=payload.user_id,
@@ -108,13 +149,14 @@ class VoxBot(commands.AutoBot):
                 broadcaster_user_id=payload.user_id,
             ),
             eventsub.ChannelSubscribeMessageSubscription(
+                # Fires for resubs that include a message (distinct from plain resubs)
                 broadcaster_user_id=payload.user_id,
             ),
             eventsub.ChannelCheerSubscription(
                 broadcaster_user_id=payload.user_id,
             ),
             eventsub.ChannelRaidSubscription(
-                to_broadcaster_user_id=payload.user_id,
+                to_broadcaster_user_id=payload.user_id,  # incoming raids only
             ),
         ]
         LOGGER.info("Subscribing for user: %s", payload.user_id)
@@ -126,6 +168,9 @@ class VoxBot(commands.AutoBot):
 
     async def add_token(self, token: str, refresh: str) -> ValidateTokenPayload:
         """Add or validate a Twitch OAuth token.
+
+        Delegates to AutoBot which calls GET /validate and stores the token
+        in its internal token store keyed by user_id.
 
         Args:
             token: Access token.
@@ -141,8 +186,12 @@ class VoxBot(commands.AutoBot):
     async def send_chat(self, text: str) -> None:
         """Send a message to the bot's own Twitch channel.
 
+        Used by the Scheduler to post rotating community messages.
+        Creates a PartialUser from the bot's own ID so no broadcaster token
+        is needed — only the bot's chat:edit scope.
+
         Args:
-            text: Message to send.
+            text: Message to send (max 500 chars enforced by Twitch API).
         """
         LOGGER.info("Sending to chat: %r", text)
         pu = self.create_partialuser(self.bot_id)
@@ -151,6 +200,12 @@ class VoxBot(commands.AutoBot):
     async def event_ready(self) -> None:
         """Called when the bot is connected and ready to receive events."""
         LOGGER.info("Successfully logged in as: %s", self.bot_id)
+
+    # ── Channel event handlers ────────────────────────────────────────────────
+    # Each handler builds a human-readable announcement string (via events.py),
+    # wraps it in a SYSTEM-kind QueuedMessage, and enqueues it.
+    # SYSTEM messages skip language detection and the announce-window check —
+    # they are always spoken in Ukrainian with a random voice.
 
     async def event_follow(self, payload: twitchio.ChannelFollow) -> None:
         """Announce a new channel follow via TTS.
@@ -167,6 +222,9 @@ class VoxBot(commands.AutoBot):
 
     async def event_subscription(self, payload: twitchio.ChannelSubscribe) -> None:
         """Announce a new (non-gift) channel subscription via TTS.
+
+        Gift subscriptions fire both this event AND event_subscription_gift.
+        We skip them here so they are only announced once by the gift handler.
 
         Args:
             payload: Subscribe event with subscriber info and tier.
@@ -185,6 +243,8 @@ class VoxBot(commands.AutoBot):
     ) -> None:
         """Announce a gift subscription event via TTS.
 
+        The gifter may be anonymous (payload.user is None in that case).
+
         Args:
             payload: Gift subscription event with gifter info and gift count.
         """
@@ -201,6 +261,9 @@ class VoxBot(commands.AutoBot):
     ) -> None:
         """Announce a resubscription with a message via TTS.
 
+        This fires when a returning subscriber includes a chat message with their
+        resub notification (cumulative month count is tracked by Twitch).
+
         Args:
             payload: Resub event with subscriber info and cumulative month count.
         """
@@ -213,6 +276,8 @@ class VoxBot(commands.AutoBot):
 
     async def event_cheer(self, payload: twitchio.ChannelCheer) -> None:
         """Announce a bits cheer event via TTS.
+
+        The cheerer may be anonymous (payload.user is None).
 
         Args:
             payload: Cheer event with cheerer info and bit count.

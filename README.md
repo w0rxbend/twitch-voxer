@@ -15,6 +15,7 @@ git clone https://github.com/your-username/twitch-voxer.git
 cd twitch-voxer
 uv sync
 cp .env.example .env   # fill in your Twitch credentials
+mkdir -p data
 uv run main.py
 ```
 
@@ -22,7 +23,7 @@ uv run main.py
 
 ```bash
 cp .env.example .env   # fill in your Twitch credentials
-mkdir -p data && cp messages.json data/
+mkdir -p data
 docker compose up --build
 ```
 
@@ -46,7 +47,7 @@ See [Getting Twitch Credentials](#getting-twitch-credentials) if you don't have 
 - **Bot filtering** — well-known bot accounts (StreamElements, Nightbot, Moobot, …) and any username containing "bot" are silently skipped.
 - **WebSocket audio streaming** — the synthesised MP3 is served over HTTP and pushed to connected browser clients via WebSocket. Audio files are deleted server-side as soon as the client confirms playback is complete.
 - **OBS browser source** — the built-in transparent page auto-connects, queues audio, and plays it sequentially with exponential-backoff reconnection (no user interaction required; OBS CEF bypasses autoplay restrictions).
-- **Scheduled messages** — posts rotating messages to chat every N seconds (configurable). Messages are read from `messages.json` at runtime — no restart needed to add or remove entries.
+- **Scheduled messages** — posts rotating messages to chat every N seconds (configurable). Messages are read from `data/messages.json` at runtime — no restart needed to add or remove entries.
 - **Colourful logging** — structured, colour-coded terminal output via `colorlog`.
 
 ---
@@ -173,7 +174,7 @@ TWITCH_BOT_USERNAME=your_bot_account_login
 
 `voices.json` is created automatically on first run.
 
-Create `messages.json` with the messages the scheduler will rotate through:
+Create `data/messages.json` with the messages the scheduler will rotate through:
 
 ```json
 {
@@ -207,7 +208,6 @@ cp .env.example .env
 
 # 2. Put your messages file into the data directory
 mkdir -p data
-cp messages.json data/
 
 # 3. Build and start
 docker compose up --build
@@ -246,7 +246,7 @@ The container exposes port **8080**.
 | `TWITCH_REFRESH_TOKEN` | *(required)* | Bot account Refresh Token |
 | `TWITCH_BOT_USERNAME` | *(required)* | Login name of the bot Twitch account |
 | `VOXER_DB_PATH` | `voices.json` | Path to the pickledb file storing username → voice mappings |
-| `VOXER_MESSAGES_PATH` | `messages.json` | Path to the scheduled messages file |
+| `VOXER_MESSAGES_PATH` | `data/messages.json` | Path to the scheduled messages file |
 | `VOXER_AUDIO_DIR` | `audio` | Directory where MP3 files are temporarily stored |
 | `VOXER_SERVER_HOST` | `0.0.0.0` | Host the HTTP/WebSocket server binds to |
 | `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
@@ -257,7 +257,7 @@ The container exposes port **8080**.
 
 ## Scheduled Messages
 
-Edit `messages.json` (or `data/messages.json` in Docker) at any time — the scheduler reloads the file on every cycle without requiring a restart:
+Edit `data/messages.json` at any time — the scheduler reloads the file on every cycle without requiring a restart:
 
 ```json
 {
@@ -295,7 +295,8 @@ twitch-voxer/
 │   ├── log.py               # Colourful logging setup
 │   └── static/
 │       └── index.html       # OBS browser source page
-├── messages.json            # Scheduled messages (pickledb format)
+├── data/
+│   └── messages.json        # Scheduled messages (pickledb format)
 ├── docker-compose.yml
 ├── Dockerfile
 └── pyproject.toml

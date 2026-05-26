@@ -1,4 +1,22 @@
+"""Randomised announcement strings for Twitch channel events.
+
+All strings are written in Ukrainian — the primary language of the stream.
+Each function picks a random entry from a private list so the announcements
+stay fresh across repeated events of the same type.
+
+The lists use a "cult" running joke where the stream community is humorously
+referred to as a sect, with the streamer as its leader.
+
+Usage:
+    from .events import follow_message, sub_message, ...
+    text = follow_message("some_username")  # → random Ukrainian string
+"""
+
 import random
+
+# ── Template lists ────────────────────────────────────────────────────────────
+# {username}, {months}, {count}, {raider}, {viewers}, {bits} are filled in by
+# the corresponding public function via str.format().
 
 _FOLLOW = [
     "{username} вирішив заблукати до нас! Виходу немає — ласкаво просимо до секти!",
@@ -29,6 +47,7 @@ _GIFT = [
     "Боже мій! {username} купив {count} підписок! Хтось сьогодні потрапить в рай, і це {username}!",
 ]
 
+# Separate list for anonymous gifters (no {username} placeholder)
 _GIFT_ANONYMOUS = [
     "Анонімний Санта подарував {count} підписок! Таємний благодійник нашої секти діє!",
     "Хтось анонімний осчасливив нас {count} підписками! Стрімер в шоці від такої щедрості!",
@@ -48,41 +67,50 @@ _CHEER = [
     "Бум! {bits} бітів від {username}! Стрімер отримав справжнє натхнення на весь вечір!",
 ]
 
+# Separate list for anonymous cheers (no {username} placeholder)
 _CHEER_ANONYMOUS = [
     "Анонімний спонсор кинув {bits} бітів! Таємний меценат секти не дрімає!",
     "Хтось анонімний пожертвував {bits} бітів! Стрімер вдячний невидимому герою!",
 ]
 
 
+# ── Public API ────────────────────────────────────────────────────────────────
+
 def follow_message(username: str) -> str:
-    """Return a random funny follow announcement."""
+    """Return a random funny follow announcement (Ukrainian)."""
     return random.choice(_FOLLOW).format(username=username)
 
 
 def sub_message(username: str) -> str:
-    """Return a random funny new-subscription announcement."""
+    """Return a random funny new-subscription announcement (Ukrainian)."""
     return random.choice(_SUBSCRIBE).format(username=username)
 
 
 def resub_message(username: str, months: int) -> str:
-    """Return a random funny resubscription announcement."""
+    """Return a random funny resubscription announcement (Ukrainian)."""
     return random.choice(_RESUB).format(username=username, months=months)
 
 
 def gift_message(username: str | None, count: int) -> str:
-    """Return a random funny gift-subscription announcement."""
+    """Return a random funny gift-subscription announcement (Ukrainian).
+
+    Picks from the anonymous list when username is None (anonymous gifter).
+    """
     if username is None:
         return random.choice(_GIFT_ANONYMOUS).format(count=count)
     return random.choice(_GIFT).format(username=username, count=count)
 
 
 def raid_message(raider: str, viewers: int) -> str:
-    """Return a random funny raid announcement."""
+    """Return a random funny raid announcement (Ukrainian)."""
     return random.choice(_RAID).format(raider=raider, viewers=viewers)
 
 
 def cheer_message(username: str | None, bits: int) -> str:
-    """Return a random funny cheer (bits) announcement."""
+    """Return a random funny cheer (bits) announcement (Ukrainian).
+
+    Picks from the anonymous list when username is None (anonymous cheerer).
+    """
     if username is None:
         return random.choice(_CHEER_ANONYMOUS).format(bits=bits)
     return random.choice(_CHEER).format(username=username, bits=bits)
