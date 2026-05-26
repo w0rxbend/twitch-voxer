@@ -107,6 +107,19 @@
       background: #55e6ff; box-shadow: 0 0 8px #55e6ff; flex-shrink: 0;
     }
     #np-badge.visible #np-dot { animation: dot-pulse 640ms ease-in-out infinite alternate; }
+    #np-avatar {
+      display: none;
+      width: 34px; height: 34px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,.32);
+      object-fit: cover; flex-shrink: 0;
+      box-shadow: 0 0 14px rgba(85,230,255,.42);
+    }
+    #np-badge.has-avatar {
+      padding-left: 8px;
+      gap: 10px;
+    }
+    #np-badge.has-avatar #np-dot { display: none; }
+    #np-badge.has-avatar #np-avatar { display: block; }
     @keyframes dot-pulse {
       from { transform: scale(.72); opacity: .62; box-shadow: 0 0 5px  #55e6ff; }
       to   { transform: scale(1.42); opacity: 1;  box-shadow: 0 0 18px #55e6ff; }
@@ -123,6 +136,7 @@
 
 <div id="np-badge">
   <span id="np-dot"></span>
+  <img id="np-avatar" alt="">
   <span id="np-name"></span>
 </div>
 
@@ -139,7 +153,13 @@
   const pending     = []; // setTimeout handles for cleanup
 
   const npBadge = document.getElementById("np-badge");
+  const npAvatar = document.getElementById("np-avatar");
   const npName  = document.getElementById("np-name");
+
+  npAvatar.addEventListener("error", () => {
+    npAvatar.removeAttribute("src");
+    npBadge.classList.remove("has-avatar");
+  });
 
   // ── Helpers ──────────────────────────────────────────────────────────────
   const rnd  = (a, b) => a + Math.random() * (b - a);
@@ -354,8 +374,15 @@
   }
 
   // ── Badge ─────────────────────────────────────────────────────────────────
-  function showBadge(username) {
+  function showBadge(username, avatarUrl) {
     npName.textContent = "@" + username;
+    if (avatarUrl) {
+      npAvatar.src = avatarUrl;
+      npBadge.classList.add("has-avatar");
+    } else {
+      npAvatar.removeAttribute("src");
+      npBadge.classList.remove("has-avatar");
+    }
     npBadge.classList.add("visible");
   }
   function hideBadge() { npBadge.classList.remove("visible"); }
@@ -368,10 +395,10 @@
 
   function playNext() {
     if (isPlaying || queue.length === 0) return;
-    const { audio_url, username, emotes } = queue.shift();
+    const { audio_url, username, avatar_url, emotes } = queue.shift();
     isPlaying = true;
 
-    showBadge(username);
+    showBadge(username, avatar_url);
     if (emotes && emotes.length > 0) startFire(emotes);
 
     const audio  = new Audio(location.origin + audio_url);

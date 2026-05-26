@@ -163,6 +163,21 @@
       filter: drop-shadow(0 0 12px rgba(85, 230, 255, 0.72));
     }
 
+    #np-avatar {
+      display: none;
+      border: 1px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      object-fit: cover;
+    }
+
+    #now-playing.has-avatar #np-fallback-icon {
+      display: none;
+    }
+
+    #now-playing.has-avatar #np-avatar {
+      display: block;
+    }
+
     #now-playing.visible #speaker-icon {
       animation: icon-pulse 420ms ease-in-out infinite alternate;
     }
@@ -289,7 +304,10 @@
 <div id="emote-layer" aria-hidden="true"></div>
 
 <div id="now-playing">
-  <span id="speaker-icon"><img src="/static/speaker.svg" alt=""></span>
+  <span id="speaker-icon">
+    <img id="np-fallback-icon" src="/static/speaker.svg" alt="">
+    <img id="np-avatar" alt="">
+  </span>
   <span id="np-username"></span>
 </div>
 
@@ -307,7 +325,13 @@
 
   const visualizer = document.getElementById("visualizer");
   const nowPlaying = document.getElementById("now-playing");
+  const npAvatar = document.getElementById("np-avatar");
   const npUsername = document.getElementById("np-username");
+
+  npAvatar.addEventListener("error", () => {
+    npAvatar.removeAttribute("src");
+    nowPlaying.classList.remove("has-avatar");
+  });
 
   const visualState = {
     active: false,
@@ -641,8 +665,15 @@
     }
   }
 
-  function showSpeaker(username, emotes) {
+  function showSpeaker(username, emotes, avatarUrl) {
     npUsername.textContent = "@" + username;
+    if (avatarUrl) {
+      npAvatar.src = avatarUrl;
+      nowPlaying.classList.add("has-avatar");
+    } else {
+      npAvatar.removeAttribute("src");
+      nowPlaying.classList.remove("has-avatar");
+    }
     nowPlaying.classList.add("visible");
     triggerVisuals();
     spawnEmotes(emotes);
@@ -694,11 +725,11 @@
 
   function playNext() {
     if (isPlaying || queue.length === 0) return;
-    const { audio_url, username, emotes } = queue.shift();
+    const { audio_url, username, avatar_url, emotes } = queue.shift();
     isPlaying = true;
     const fullUrl = location.origin + audio_url;
     console.log(`[${username}] ${fullUrl}`, emotes?.map(e => e.name));
-    showSpeaker(username, emotes);
+    showSpeaker(username, emotes, avatar_url);
 
     const audio = new Audio(fullUrl);
     connectAudioReactivity(audio);

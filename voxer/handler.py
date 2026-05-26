@@ -16,8 +16,8 @@ Pipeline for a USER message:
                               the user's last message, "username says:" is prepended.
   8. WAV synthesis          — Supertonic TTS runs in a thread (it is CPU-bound).
   9. MP3 conversion         — ffmpeg converts the temporary WAV to MP3.
-  10. WebSocket broadcast   — the MP3 URL and emote list are pushed to all connected
-                              browser clients.
+  10. WebSocket broadcast   — the MP3 URL, avatar URL, and emote list are pushed to
+                              all connected browser clients.
 
 SYSTEM messages (follows, subs, raids, cheers) skip steps 1-7 and go directly
 to synthesis with a random voice in Ukrainian.
@@ -81,8 +81,8 @@ _ANNOUNCEMENTS: dict[str, str] = {
 
 # Replacement text for URLs, chosen based on the detected language of the message.
 _LINK_REPLACEMENTS: dict[str, str] = {
-    "en": "see link in the chat",
-    "uk": "дивіться посилання в чаті",
+    "en": "... see link in the chat ...",
+    "uk": "... дивіться посилання в чаті ...",
 }
 
 # ── Regular expressions ───────────────────────────────────────────────────────
@@ -288,6 +288,7 @@ class BroadcastEvent:
     """Payload sent over WebSocket to the browser overlay after synthesis."""
     audio_url: str          # relative URL served by AudioServer, e.g. "/audio/<uuid>.mp3"
     username: str           # chatter's Twitch login name
+    avatar_url: str | None = None  # Twitch profile image URL, when available
     emotes: list[EmoteItem] = field(default_factory=list)  # emotes rendered alongside audio
 
 
@@ -304,6 +305,7 @@ class QueuedMessage:
     text: str
     kind: MessageKind = field(default=MessageKind.USER)
     emote_names: list[str] = field(default_factory=list)  # Twitch emote names from message fragments
+    avatar_url: str | None = None
 
 
 # ── Helper functions ──────────────────────────────────────────────────────────
@@ -516,6 +518,7 @@ class MessageHandler:
         lang: str,
         emote_names: list[str],
         emoji_items: list[EmoteItem],
+        avatar_url: str | None,
     ) -> None:
         """Synthesise final_text to MP3 and push the result to all WebSocket clients.
 
@@ -552,6 +555,7 @@ class MessageHandler:
         event = BroadcastEvent(
             audio_url=f"/audio/{mp3_path.name}",
             username=username,
+            avatar_url=avatar_url,
             emotes=all_emotes,
         )
         LOGGER.info(
@@ -571,7 +575,13 @@ class MessageHandler:
         LOGGER.info("Announcing system event for %s", message.username)
         voice = random.choice(self._voices)
         await self._synthesize_and_broadcast(
-            message.username, message.text, voice, "uk", message.emote_names, []
+            message.username,
+            message.text,
+            voice,
+            "uk",
+            message.emote_names,
+            [],
+            message.avatar_url,
         )
 
     async def _handle_user(self, message: QueuedMessage) -> None:
@@ -605,6 +615,7 @@ class MessageHandler:
                 await self._broadcast(BroadcastEvent(
                     audio_url=f"/audio/{mp3_path.name}",
                     username=message.username,
+                    avatar_url=message.avatar_url,
                     emotes=all_emotes,
                 ))
             else:
@@ -631,7 +642,13 @@ class MessageHandler:
             await self._record_message(message.username)
 
         await self._synthesize_and_broadcast(
-            message.username, final_text, voice, lang, message.emote_names, emoji_items
+            message.username,
+            final_text,
+            voice,
+            lang,
+            message.emote_names,
+            emoji_items,
+            message.avatar_url,
         )
 
     async def handle(self, message: QueuedMessage) -> None:

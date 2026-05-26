@@ -8,7 +8,7 @@ Built on Starlette + uvicorn.  Serves:
 
 Audio file lifecycle:
   1. MessageHandler writes a UUID-named MP3 to audio_dir.
-  2. AudioServer.broadcast() pushes {audio_url, username, emotes} over WebSocket.
+  2. AudioServer.broadcast() pushes {audio_url, username, avatar_url, emotes} over WebSocket.
   3. The browser plays the audio and fires an 'ended' event on the <audio> element.
   4. The browser sends {"done": "filename.mp3"} back over the WebSocket.
   5. ws_endpoint unlinks the file from audio_dir (path-traversal check included).
@@ -127,7 +127,7 @@ class AudioServer:
         the iteration so subsequent messages skip them.
 
         Args:
-            event: BroadcastEvent with audio_url, username, and emotes list.
+            event: BroadcastEvent with audio_url, username, avatar_url, and emotes list.
         """
         if not self._clients:
             LOGGER.debug("No WS clients connected, skipping broadcast")

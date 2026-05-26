@@ -38,6 +38,24 @@ from .handler import MessageKind, QueuedMessage
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
+def _asset_to_url(asset: object) -> str | None:
+    """Return a URL string from a TwitchIO Asset-like object."""
+    if asset is None:
+        return None
+
+    for attr in ("url", "_url"):
+        value = getattr(asset, attr, None)
+        if callable(value):
+            value = value()
+        if isinstance(value, str) and value:
+            return value
+
+    value = str(asset)
+    if value.startswith(("http://", "https://")):
+        return value
+    return None
+
+
 async def get_user_id(username: str) -> str:
     """Fetch Twitch user ID by login name.
 
@@ -83,6 +101,7 @@ class VoxBot(commands.AutoBot):
             message_queue: Queue for dispatching chat messages to the handler.
         """
         self._message_queue = message_queue
+        self._avatar_url_cache: dict[str, str | None] = {}
         super().__init__(
             client_id=CLIENT_ID,
             client_secret=CLIENT_SECRET,
@@ -92,6 +111,31 @@ class VoxBot(commands.AutoBot):
             subscriptions=subs,
             force_subscribe=True,  # re-subscribe even if already active on Twitch's side
         )
+
+    async def _get_avatar_url(self, chatter: object) -> str | None:
+        """Fetch and cache the chatter's Twitch profile image URL."""
+        chatter_id = getattr(chatter, "id", None)
+        login = getattr(chatter, "name", None)
+        cache_key = str(chatter_id or login or "")
+        if not cache_key:
+            return None
+        if cache_key in self._avatar_url_cache:
+            return self._avatar_url_cache[cache_key]
+
+        try:
+            if chatter_id:
+                user = await self.fetch_user(id=chatter_id)
+            elif login:
+                user = await self.fetch_user(login=login)
+            else:
+                return None
+        except Exception as exc:
+            LOGGER.warning("Could not fetch avatar for %s: %s", cache_key, exc)
+            return None
+
+        avatar_url = _asset_to_url(getattr(user, "profile_image", None))
+        self._avatar_url_cache[cache_key] = avatar_url
+        return avatar_url
 
     async def event_message(self, payload: ChatMessage) -> None:
         """Handle incoming Twitch chat message by enqueuing it for TTS processing.
@@ -112,9 +156,20 @@ class VoxBot(commands.AutoBot):
         emote_names = [
             fragment.text for fragment in payload.fragments if fragment.type == "emote"
         ]
-        LOGGER.info("Received message: %s — text=%r emotes=%r", payload.chatter.name, tts_text, emote_names)
+        avatar_url = await self._get_avatar_url(payload.chatter)
+        LOGGER.info(
+            "Received message: %s — text=%r emotes=%r",
+            payload.chatter.name,
+            tts_text,
+            emote_names,
+        )
         await self._message_queue.put(
-            QueuedMessage(username=payload.chatter.name, text=tts_text, emote_names=emote_names)
+            QueuedMessage(
+                username=payload.chatter.name,
+                text=tts_text,
+                emote_names=emote_names,
+                avatar_url=avatar_url,
+            )
         )
         # Call super() so twitchio can route any "!" prefixed commands
         await super().event_message(payload)
