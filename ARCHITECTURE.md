@@ -69,7 +69,7 @@ graph TD
 
 ## Startup / Wiring Sequence
 
-`voxer/__init__.py` is the **composition root** — it instantiates every component and wires their dependencies before handing control to `asyncio.gather`.
+`voxer/__init__.py` is the **composition root** — it instantiates every component and wires their dependencies before handing control to an `asyncio.TaskGroup`.
 
 ```mermaid
 sequenceDiagram
@@ -90,7 +90,7 @@ sequenceDiagram
     init->>bot: VoxBot(bot_id, subs, message_queue)
     init->>bot: await bot.add_token(ACCESS_TOKEN, REFRESH_TOKEN)
     init->>sch: Scheduler(bot.send_chat, messages_path, interval)
-    init->>init: asyncio.gather(bot.start, server.serve, scheduler.run, handler.process_queue)
+    init->>init: TaskGroup: bot.start, server.serve, scheduler.run, handler.process_queue
     Note over init: All four coroutines run concurrently forever
 ```
 
@@ -121,9 +121,8 @@ sequenceDiagram
         MH->>MH: _detect_lang()  ← langdetect (in thread)
         MH->>MH: _get_or_assign_voice()  ← pickledb, locked
         MH->>MH: _normalize()  ← expand abbrevs, replace URLs, laugh tags
-        MH->>MH: _should_announce()  ← check timestamp window
+        MH->>MH: _claim_announcement()  ← check window + save timestamp
         MH->>MH: prepend "username says:" if outside window
-        MH->>MH: _record_message()  ← save current timestamp
         MH->>TTS: save_wav(text, voice, lang)  ← in thread
         MH->>TTS: to_mp3(wav, mp3)  ← ffmpeg subprocess
         MH->>SRV: broadcast(BroadcastEvent(audio_url, username, emotes))

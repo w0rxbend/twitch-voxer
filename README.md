@@ -229,6 +229,38 @@ VOXER_AUDIO_DIR:     /data/audio
 
 The container exposes port **8080**.
 
+### Multi-architecture builds (amd64 + arm64)
+
+The image builds for both `linux/amd64` and `linux/arm64` (e.g. Raspberry Pi 4/5,
+AWS Graviton, Apple Silicon servers). On an x86_64 host, arm64 builds run under
+QEMU emulation, which needs a one-time setup:
+
+```bash
+# 1. Register the arm64 emulator with the kernel (one-time, survives reboots
+#    until the next kernel update)
+docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+# 2. Create a builder that can produce multi-platform images (one-time)
+docker buildx create --name multiarch --driver docker-container
+```
+
+Then either build both architectures at once via the platforms already declared
+in `docker-compose.yml` (add `--push` to publish to a registry — the local
+Docker store cannot hold a two-architecture image without containerd):
+
+```bash
+docker buildx bake --builder multiarch
+```
+
+Or build only the arm64 image and load it into the local Docker store:
+
+```bash
+docker buildx build --platform linux/arm64 -t twitch-voxer:arm64 --load .
+```
+
+Emulated arm64 builds are noticeably slower than native ones — expect several
+minutes for the dependency-install step.
+
 ---
 
 ## OBS Browser Source Setup
@@ -255,7 +287,7 @@ The container exposes port **8080**.
 | `VOXER_AUDIO_DIR` | `audio` | Directory where MP3 files are temporarily stored |
 | `VOXER_SERVER_HOST` | `0.0.0.0` | Host the HTTP/WebSocket server binds to |
 | `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
-| `VOXER_SCHEDULER_INTERVAL` | `600` | Fallback retry delay when no scheduled messages are available |
+| `VOXER_SCHEDULER_EMPTY_RETRY_DELAY` | `600` | Delay before re-checking when the scheduled-message list is empty (`VOXER_SCHEDULER_INTERVAL` is a deprecated alias) |
 | `VOXER_SCHEDULER_INITIAL_DELAY` | `10` | Seconds to wait before the first scheduled message |
 
 ---
@@ -299,6 +331,7 @@ twitch-voxer/
 │   ├── config.py            # Environment variable loading
 │   ├── bot.py               # Twitch adapter (twitchio AutoBot + EventSub)
 │   ├── handler.py           # Business logic (lang detect, voice assign, normalise, TTS)
+│   ├── models.py            # Shared dataclasses (QueuedMessage, BroadcastEvent, ...)
 │   ├── tts.py               # TTS infrastructure (Supertonic WAV + ffmpeg MP3)
 │   ├── server.py            # HTTP + WebSocket server (Starlette)
 │   ├── scheduler.py         # Periodic chat message scheduler
