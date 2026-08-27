@@ -1,6 +1,29 @@
+# One-command deployment: `docker compose up -d --build`
+#
+# Requires a `.env` file next to this compose file (copy .env.example and fill
+# in the four TWITCH_* credentials).  All secrets come from that file via
+# `env_file`; the `environment` block below only overrides container paths.
+#
+# To only build the image (tagged twitch-voxer:latest) without starting it:
+#   docker compose build
+#
+# Multi-architecture (amd64 + arm64) builds — one-time setup on an x86_64 host:
+#   docker run --privileged --rm tonistiigi/binfmt --install arm64
+#   docker buildx create --name multiarch --driver docker-container
+# Then build both architectures (add --push to publish to a registry):
+#   docker buildx bake --builder multiarch
+# Or build just the arm64 image and load it into the local Docker store:
+#   docker buildx build --platform linux/arm64 -t twitch-voxer:arm64 --load .
 services:
   voxer:
-    build: .
+    image: twitch-voxer:latest
+    build:
+      context: .
+      # Used by `docker buildx bake` for multi-arch builds; plain
+      # `docker compose build` still builds only the host architecture.
+      platforms:
+        - linux/amd64
+        - linux/arm64
     ports:
       - "8080:8080"
     env_file: .env
@@ -12,7 +35,14 @@ services:
       VOXER_SERVER_HOST: "0.0.0.0"
       VOXER_SERVER_PORT: "8080"
     volumes:
+      # Persistent state: voice assignments, timestamps, scheduled messages, audio
       - ./data:/data
+      # Custom voice styles and emote assets are read from the repo, read-only —
+      # the image itself does not bundle them
+      - ./voices:/app/voices:ro
+      - ./emotes:/app/emotes:ro
+      # Supertonic model cache — survives rebuilds so the ~100 MB model is
+      # downloaded only once
       - tts-cache:/home/voxer/.cache
     restart: unless-stopped
 
