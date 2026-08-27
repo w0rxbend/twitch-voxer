@@ -33,7 +33,7 @@ from .events import (
     resub_message,
     sub_message,
 )
-from .handler import MessageKind, QueuedMessage
+from .models import MessageKind, QueuedMessage
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -165,7 +165,7 @@ class VoxBot(commands.AutoBot):
         )
         await self._message_queue.put(
             QueuedMessage(
-                username=payload.chatter.name,
+                username=payload.chatter.name or "unknown",
                 text=tts_text,
                 emote_names=emote_names,
                 avatar_url=avatar_url,
@@ -257,10 +257,21 @@ class VoxBot(commands.AutoBot):
         LOGGER.info("Successfully logged in as: %s", self.bot_id)
 
     # ── Channel event handlers ────────────────────────────────────────────────
-    # Each handler builds a human-readable announcement string (via events.py),
-    # wraps it in a SYSTEM-kind QueuedMessage, and enqueues it.
+    # Each handler builds a human-readable announcement string (via events.py)
+    # and enqueues it via _enqueue_system.
     # SYSTEM messages skip language detection and the announce-window check —
     # they are always spoken in Ukrainian with a random voice.
+
+    async def _enqueue_system(self, username: str, text: str) -> None:
+        """Wrap an announcement in a SYSTEM-kind QueuedMessage and enqueue it.
+
+        Args:
+            username: Display name for the overlay ("anonymous" for hidden gifters).
+            text: Ready-to-speak announcement string from events.py.
+        """
+        await self._message_queue.put(
+            QueuedMessage(username=username, text=text, kind=MessageKind.SYSTEM)
+        )
 
     async def event_follow(self, payload: twitchio.ChannelFollow) -> None:
         """Announce a new channel follow via TTS.
@@ -268,12 +279,10 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Follow event with the new follower's info.
         """
-        username = payload.user.name
+        # Twitch can omit the login name in rare payloads; fall back to a placeholder
+        username = payload.user.name or "unknown"
         LOGGER.info("New follow from %s", username)
-        text = follow_message(username)
-        await self._message_queue.put(
-            QueuedMessage(username=username, text=text, kind=MessageKind.SYSTEM)
-        )
+        await self._enqueue_system(username, follow_message(username))
 
     async def event_subscription(self, payload: twitchio.ChannelSubscribe) -> None:
         """Announce a new (non-gift) channel subscription via TTS.
@@ -286,12 +295,10 @@ class VoxBot(commands.AutoBot):
         """
         if payload.gift:
             return  # gift subscriptions are handled by event_subscription_gift
-        username = payload.user.name
+        # Twitch can omit the login name in rare payloads; fall back to a placeholder
+        username = payload.user.name or "unknown"
         LOGGER.info("New subscription from %s (tier %s)", username, payload.tier)
-        text = sub_message(username)
-        await self._message_queue.put(
-            QueuedMessage(username=username, text=text, kind=MessageKind.SYSTEM)
-        )
+        await self._enqueue_system(username, sub_message(username))
 
     async def event_subscription_gift(
         self, payload: twitchio.ChannelSubscriptionGift
@@ -306,10 +313,7 @@ class VoxBot(commands.AutoBot):
         username = payload.user.name if payload.user else None
         display = username or "anonymous"
         LOGGER.info("Gift sub from %s: %d subs", display, payload.total)
-        text = gift_message(username, payload.total)
-        await self._message_queue.put(
-            QueuedMessage(username=display, text=text, kind=MessageKind.SYSTEM)
-        )
+        await self._enqueue_system(display, gift_message(username, payload.total))
 
     async def event_subscription_message(
         self, payload: twitchio.ChannelSubscriptionMessage
@@ -322,11 +326,11 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Resub event with subscriber info and cumulative month count.
         """
-        username = payload.user.name
+        # Twitch can omit the login name in rare payloads; fall back to a placeholder
+        username = payload.user.name or "unknown"
         LOGGER.info("Resub from %s (%d months)", username, payload.cumulative_months)
-        text = resub_message(username, payload.cumulative_months)
-        await self._message_queue.put(
-            QueuedMessage(username=username, text=text, kind=MessageKind.SYSTEM)
+        await self._enqueue_system(
+            username, resub_message(username, payload.cumulative_months)
         )
 
     async def event_cheer(self, payload: twitchio.ChannelCheer) -> None:
@@ -340,10 +344,7 @@ class VoxBot(commands.AutoBot):
         username = payload.user.name if payload.user else None
         display = username or "anonymous"
         LOGGER.info("Cheer from %s: %d bits", display, payload.bits)
-        text = cheer_message(username, payload.bits)
-        await self._message_queue.put(
-            QueuedMessage(username=display, text=text, kind=MessageKind.SYSTEM)
-        )
+        await self._enqueue_system(display, cheer_message(username, payload.bits))
 
     async def event_raid(self, payload: twitchio.ChannelRaid) -> None:
         """Announce an incoming raid via TTS.
@@ -351,10 +352,7 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Raid event with raiding broadcaster info and viewer count.
         """
-        raider = payload.from_broadcaster.name
+        raider = payload.from_broadcaster.name or "unknown"
         viewers = payload.viewer_count
         LOGGER.info("Raid from %s with %d viewers", raider, viewers)
-        text = raid_message(raider, viewers)
-        await self._message_queue.put(
-            QueuedMessage(username=raider, text=text, kind=MessageKind.SYSTEM)
-        )
+        await self._enqueue_system(raider, raid_message(raider, viewers))

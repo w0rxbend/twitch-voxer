@@ -9,7 +9,7 @@ Startup order matters:
   2. TTSService downloads the model on first run, so it starts early.
   3. MessageHandler.preload_resources() must complete before messages arrive (loads emote DB).
   4. bot_id is fetched before the bot socket opens so subscriptions can reference it.
-  5. asyncio.gather() starts all four long-running coroutines concurrently.
+  5. An asyncio.TaskGroup starts all four long-running coroutines concurrently.
 """
 
 import asyncio
@@ -22,11 +22,12 @@ from .bot import VoxBot, get_user_id
 from .config import (
     ACCESS_TOKEN, ANNOUNCE_WINDOW_SECS, AUDIO_DIR, BOT_USERNAME, DB_PATH,
     EMOTE_SOUND_PATHS, EMOTES_DB_PATH, MESSAGES_PATH, NO_ANNOUNCE_USERS,
-    REFRESH_TOKEN, SCHEDULER_INITIAL_DELAY, SCHEDULER_INTERVAL, SERVER_HOST,
-    SERVER_PORT, TIMESTAMPS_DB_PATH, VOICES_DIR,
+    REFRESH_TOKEN, SCHEDULER_EMPTY_RETRY_DELAY, SCHEDULER_INITIAL_DELAY,
+    SERVER_HOST, SERVER_PORT, TIMESTAMPS_DB_PATH, VOICES_DIR, validate_required,
 )
-from .handler import MessageHandler, QueuedMessage
+from .handler import MessageHandler
 from .log import setup_logging
+from .models import QueuedMessage
 from .scheduler import Scheduler
 from .server import AudioServer
 from .tts import TTSService
@@ -38,15 +39,28 @@ async def run() -> None:
     """Initialize and start the Twitch TTS bot with all components.
 
     Wires together: TTS service, audio server, message handler, Twitch bot, and scheduler.
-    Runs bot, server, scheduler, and message handler in concurrent tasks via asyncio.gather().
+    Runs bot, server, scheduler, and message handler concurrently in an asyncio.TaskGroup.
     """
     # Must happen first — every subsequent import uses logging
     setup_logging()
+
+    # Fail fast with a complete list of missing credentials before any
+    # component (which would fail later with a less helpful error) starts.
+    validate_required()
 
     # Ensure the audio output directory exists before any MP3 is written there
     audio_dir = Path(AUDIO_DIR)
     audio_dir.mkdir(exist_ok=True)
     LOGGER.info("Audio dir: %s", audio_dir.resolve())
+
+    # MP3s are normally deleted when the overlay reports playback done, but
+    # files leak when no client is connected or the process is restarted
+    # mid-playback.  Everything in audio_dir is ephemeral, so sweep it at boot.
+    stale = list(audio_dir.glob("*.mp3"))
+    for mp3 in stale:
+        mp3.unlink(missing_ok=True)
+    if stale:
+        LOGGER.info("Removed %d leftover audio file(s) from previous runs", len(stale))
 
     # Single shared queue: VoxBot puts QueuedMessages, MessageHandler drains them.
     # Using a queue decouples fast Twitch event arrival from slow TTS synthesis.
@@ -97,19 +111,19 @@ async def run() -> None:
         scheduler = Scheduler(
             send_chat=bot.send_chat,
             messages_path=Path(MESSAGES_PATH),
-            interval=SCHEDULER_INTERVAL,
+            empty_retry_delay=SCHEDULER_EMPTY_RETRY_DELAY,
             initial_delay=SCHEDULER_INITIAL_DELAY,
         )
 
         # All four coroutines run concurrently on the same event loop.
-        # None of them return under normal operation; any exception propagates
-        # and will cause the gather to cancel the remaining tasks.
-        await asyncio.gather(
-            bot.start(load_tokens=False),   # Twitch EventSub WebSocket
-            server.serve(),                 # Starlette HTTP + WebSocket server
-            scheduler.run(),               # periodic chat message poster
-            handler.process_queue(),       # TTS synthesis loop
-        )
+        # None of them return under normal operation.  TaskGroup (unlike
+        # asyncio.gather) cancels the sibling tasks when one of them fails,
+        # so a fatal error in any component shuts the whole app down cleanly.
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(bot.start(load_tokens=False))  # Twitch EventSub WebSocket
+            tg.create_task(server.serve())                # Starlette HTTP + WebSocket server
+            tg.create_task(scheduler.run())               # periodic chat message poster
+            tg.create_task(handler.process_queue())       # TTS synthesis loop
 
 
 def main() -> None:

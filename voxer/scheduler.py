@@ -32,7 +32,7 @@ class Scheduler:
         self,
         send_chat: Callable[[str], Awaitable[None]],
         messages_path: Path,
-        interval: int = 600,
+        empty_retry_delay: int = 600,
         initial_delay: int = 10,
     ) -> None:
         """Initialize the scheduler with a chat callback and message database.
@@ -42,13 +42,16 @@ class Scheduler:
                        Typically VoxBot.send_chat — injected to avoid circular imports.
             messages_path: Path to pickledb JSON file with a "messages" key containing
                            message objects with text and frequency_per_hour.
-            interval: Fallback retry delay when no messages are available.
+            empty_retry_delay: Seconds to wait before re-checking when the message
+                               list is empty or invalid.  The normal posting cadence
+                               is NOT this value — it is derived from each message's
+                               frequency_per_hour.
             initial_delay: Seconds to wait before the first message (default: 10).
                            Gives the EventSub connection time to establish before posting.
         """
         self._send_chat = send_chat
         self._db = pickledb.PickleDB(str(messages_path))
-        self._interval = interval
+        self._empty_retry_delay = empty_retry_delay
         self._initial_delay = initial_delay
         self._sent_count = 0
 
@@ -120,20 +123,20 @@ class Scheduler:
     def _delay_for(self, messages: list[ScheduledMessage]) -> float:
         total_frequency_per_hour = sum(message.frequency_per_hour for message in messages)
         if total_frequency_per_hour <= 0:
-            return float(self._interval)
+            return float(self._empty_retry_delay)
         return SECONDS_PER_HOUR / total_frequency_per_hour
 
     async def run(self) -> None:
         """Continuously post random scheduled messages to chat.
 
-        Runs as one of the four concurrent tasks started by asyncio.gather() in __init__.py.
+        Runs as one of the four concurrent tasks started by the asyncio.TaskGroup in __init__.py.
         The initial_delay gives the bot time to finish the EventSub handshake and token
         validation before attempting to post chat messages.
         """
         LOGGER.info(
             "Scheduler ready — first message in %ds, fallback retry every %ds",
             self._initial_delay,
-            self._interval,
+            self._empty_retry_delay,
         )
         await asyncio.sleep(self._initial_delay)
         while True:
@@ -149,7 +152,14 @@ class Scheduler:
                     delay,
                     message.text[:60],
                 )
-                await self._send_chat(message.text)
+                try:
+                    await self._send_chat(message.text)
+                except Exception:
+                    # A transient Twitch API failure (network blip, token refresh,
+                    # 500) must not kill the scheduler — and, via the TaskGroup
+                    # cancelling its siblings, the whole application.
+                    # Log and try again next cycle.
+                    LOGGER.exception("Failed to post scheduled message")
             else:
-                delay = float(self._interval)
+                delay = float(self._empty_retry_delay)
             await asyncio.sleep(delay)

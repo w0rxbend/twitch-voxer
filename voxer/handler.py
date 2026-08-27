@@ -31,13 +31,13 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from enum import Enum, auto
 from pathlib import Path
 
 import emoji as emoji_lib
 import pickledb
 from langdetect import detect, LangDetectException
+
+from .models import BroadcastEvent, EmoteItem, MessageKind, QueuedMessage
 from .tts import TTSService
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -274,40 +274,6 @@ def _extract_emojis(text: str) -> tuple[str, list["EmoteItem"]]:
     return clean, items
 
 
-# ── Data classes ──────────────────────────────────────────────────────────────
-
-@dataclass
-class EmoteItem:
-    """A single emote or emoji to be displayed in the browser overlay."""
-    name: str  # display name or raw emoji character
-    url: str   # absolute URL to the image asset
-
-
-@dataclass
-class BroadcastEvent:
-    """Payload sent over WebSocket to the browser overlay after synthesis."""
-    audio_url: str          # relative URL served by AudioServer, e.g. "/audio/<uuid>.mp3"
-    username: str           # chatter's Twitch login name
-    avatar_url: str | None = None  # Twitch profile image URL, when available
-    emotes: list[EmoteItem] = field(default_factory=list)  # emotes rendered alongside audio
-
-
-class MessageKind(Enum):
-    """Distinguishes chat messages from channel-event announcements."""
-    USER = auto()    # regular chatter message — full pipeline
-    SYSTEM = auto()  # follow/sub/raid/cheer — spoken directly, no announce window
-
-
-@dataclass
-class QueuedMessage:
-    """A message waiting to be spoken via TTS."""
-    username: str
-    text: str
-    kind: MessageKind = field(default=MessageKind.USER)
-    emote_names: list[str] = field(default_factory=list)  # Twitch emote names from message fragments
-    avatar_url: str | None = None
-
-
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 def _is_bot(username: str) -> bool:
@@ -425,13 +391,24 @@ class MessageHandler:
         LOGGER.info("MessageHandler ready")
 
     async def preload_resources(self) -> None:
-        """Load async resources (emotes DB) that cannot be awaited in __init__.
+        """Load async resources (emotes, voice, and timestamp DBs) that cannot be awaited in __init__.
 
         Called once by the composition root before the message queue starts draining.
         Failure to load emotes is non-fatal — the overlay simply won't show images.
+
+        The voice and timestamp DBs are loaded once here rather than re-read on
+        every message: this process is their sole reader and writer, so per-message
+        reloads were pure disk I/O waste on the hot path.
         """
         if self._emotes_db_path:
             self._emotes = await self._load_emotes(self._emotes_db_path)
+        for db, label in ((self._db, "voice"), (self._ts_db, "timestamp")):
+            try:
+                await db.load()
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                # A missing or corrupt DB file must not abort startup — start
+                # with an empty DB; the next save() rewrites the file cleanly.
+                LOGGER.warning("Could not load %s DB, starting empty: %s", label, exc)
 
     async def _load_emotes(self, path: str) -> dict[str, dict]:
         """Load emote name → image URL mappings from the pickledb emote cache.
@@ -457,14 +434,20 @@ class MessageHandler:
     async def _get_or_assign_voice(self, username: str) -> str:
         """Return the voice assigned to username, creating one if this is a new chatter.
 
+        A persisted voice that is no longer in the pool (e.g. a custom voice whose
+        JSON file was deleted or renamed) is replaced with a fresh assignment —
+        otherwise synthesis would crash on every future message from that user.
+
         The lock serialises concurrent reads and writes to the same pickledb file,
         which is not thread-safe or async-safe on its own.
         """
         async with self._voice_lock:
-            await self._db.load()
             voice = await self._db.get(username)
-            if not voice:
-                # First message from this user — pick and persist a random voice
+            if voice not in self._voices:
+                if voice:
+                    LOGGER.warning(
+                        "Voice %r for %s no longer exists — reassigning", voice, username
+                    )
                 voice = random.choice(self._voices)
                 await self._db.set(username, voice)
                 LOGGER.info("New chatter %s — assigned voice %s", username, voice)
@@ -489,29 +472,43 @@ class MessageHandler:
             LOGGER.debug("Lang detection failed, defaulting to %s", DEFAULT_LANG)
             return DEFAULT_LANG
 
-    async def _should_announce(self, username: str) -> bool:
-        """Return True if more than announce_window_secs have passed since the user's last message.
+    async def _claim_announcement(self, username: str) -> bool:
+        """Atomically check the announce window and record the message timestamp.
 
-        Must be called inside _ts_lock to avoid a TOCTOU race with _record_message.
+        Returns True when more than announce_window_secs have passed since the
+        user's last message (or this is their first message), meaning the caller
+        should prepend the "username says:" prefix.  The timestamp is always
+        updated, even when no announcement is due.
+
+        Owning the lock here (rather than relying on callers to pair a separate
+        check and update under it) makes the check-then-update atomic by
+        construction, so two concurrent messages from the same user cannot both
+        claim the prefix.
         """
-        await self._ts_db.load()
-        last = await self._ts_db.get(username)
-        if not last:
-            # First ever message from this user
-            return True
-        return (time.time() - float(last)) > self._announce_window_secs
+        async with self._ts_lock:
+            last = await self._ts_db.get(username)
+            announce = (
+                not last or (time.time() - float(last)) > self._announce_window_secs
+            )
+            await self._ts_db.set(username, str(time.time()))
+            await self._ts_db.save()
+        return announce
 
-    async def _record_message(self, username: str) -> None:
-        """Persist the current timestamp as the user's last-message time.
+    def _resolve_twitch_emotes(self, names: list[str]) -> list[EmoteItem]:
+        """Resolve Twitch emote names to overlay items via the in-memory emote cache.
 
-        Must be called inside _ts_lock, immediately after _should_announce(),
-        so the check and update are atomic with respect to other coroutines.
+        Names missing from the cache are silently dropped — the overlay simply
+        won't show an image for them.
         """
-        await self._ts_db.set(username, str(time.time()))
-        await self._ts_db.save()
+        return [
+            EmoteItem(name=name, url=self._emotes[name]["url_2x"])
+            for name in names
+            if name in self._emotes
+        ]
 
     async def _synthesize_and_broadcast(
         self,
+        *,
         username: str,
         final_text: str,
         voice: str,
@@ -533,13 +530,7 @@ class MessageHandler:
         from concurrent messages.  The browser client deletes it after playback
         by sending {"done": "filename.mp3"} over WebSocket.
         """
-        # Resolve Twitch emote names to their 2x image URLs from the emote cache
-        twitch_emote_items = [
-            EmoteItem(name=name, url=self._emotes[name]["url_2x"])
-            for name in emote_names
-            if name in self._emotes
-        ]
-        all_emotes = twitch_emote_items + emoji_items
+        all_emotes = self._resolve_twitch_emotes(emote_names) + emoji_items
 
         # Synthesis is synchronous and CPU-bound; run it off the event loop
         wav_path = await asyncio.to_thread(
@@ -548,6 +539,11 @@ class MessageHandler:
         mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
         try:
             await self._tts.to_mp3(wav_path, mp3_path)
+        except BaseException:
+            # ffmpeg may have written a partial MP3 before failing — remove it
+            # so broken files don't accumulate in audio_dir
+            mp3_path.unlink(missing_ok=True)
+            raise
         finally:
             # Always clean up the temporary WAV even if ffmpeg fails
             wav_path.unlink()
@@ -573,16 +569,42 @@ class MessageHandler:
         all event announcement strings in events.py are written in Ukrainian.
         """
         LOGGER.info("Announcing system event for %s", message.username)
-        voice = random.choice(self._voices)
         await self._synthesize_and_broadcast(
-            message.username,
-            message.text,
-            voice,
-            "uk",
-            message.emote_names,
-            [],
-            message.avatar_url,
+            username=message.username,
+            final_text=message.text,
+            voice=random.choice(self._voices),
+            lang="uk",
+            emote_names=message.emote_names,
+            emoji_items=[],
+            avatar_url=message.avatar_url,
         )
+
+    async def _handle_emote_only(
+        self, message: QueuedMessage, emoji_items: list[EmoteItem]
+    ) -> None:
+        """Play a random notification sound for a message with no spoken text.
+
+        Fires when emoji removal left nothing to synthesise — the message was
+        pure emotes/emoji.  The emotes still show in the overlay alongside the
+        notification sound.  With no resolvable emotes or no configured sounds,
+        the message is silently skipped.
+        """
+        all_emotes = self._resolve_twitch_emotes(message.emote_names) + emoji_items
+        if not (all_emotes and self._emote_sounds):
+            LOGGER.info("Skipping emote-only from %s", message.username)
+            return
+        sound = random.choice(self._emote_sounds)
+        LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
+        mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
+        # Copy rather than move so the source sound file is preserved for reuse.
+        # Runs in a thread — file I/O would otherwise block the event loop.
+        await asyncio.to_thread(shutil.copy2, sound, mp3_path)
+        await self._broadcast(BroadcastEvent(
+            audio_url=f"/audio/{mp3_path.name}",
+            username=message.username,
+            avatar_url=message.avatar_url,
+            emotes=all_emotes,
+        ))
 
     async def _handle_user(self, message: QueuedMessage) -> None:
         """Process a regular chat message through the full normalisation pipeline.
@@ -598,57 +620,32 @@ class MessageHandler:
         clean_text, emoji_items = _extract_emojis(message.text)
 
         if not clean_text.strip():
-            # Message was emote-only (no spoken text remains after emoji removal).
-            # Play a random notification sound and show emotes in the overlay.
-            twitch_emote_items = [
-                EmoteItem(name=name, url=self._emotes[name]["url_2x"])
-                for name in message.emote_names
-                if name in self._emotes
-            ]
-            all_emotes = twitch_emote_items + emoji_items
-            if all_emotes and self._emote_sounds:
-                sound = random.choice(self._emote_sounds)
-                LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
-                mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
-                # Copy rather than move so the source sound file is preserved for reuse
-                shutil.copy2(sound, mp3_path)
-                await self._broadcast(BroadcastEvent(
-                    audio_url=f"/audio/{mp3_path.name}",
-                    username=message.username,
-                    avatar_url=message.avatar_url,
-                    emotes=all_emotes,
-                ))
-            else:
-                LOGGER.info("Skipping emote-only from %s", message.username)
+            await self._handle_emote_only(message, emoji_items)
             return
 
         lang = await self._detect_lang(clean_text)
         voice = await self._get_or_assign_voice(message.username)
         normalized = _normalize(clean_text, lang)
 
-        # Lock covers both the announce check and the timestamp update so that
-        # two concurrent messages from the same user don't both get the prefix.
-        async with self._ts_lock:
-            if (
-                message.username.lower() not in self._no_announce_users
-                and await self._should_announce(message.username)
-            ):
-                final_text = _ANNOUNCEMENTS[lang].format(
-                    username=message.username, text=normalized
-                )
-                LOGGER.debug("Announcing prefix for %s (outside window)", message.username)
-            else:
-                final_text = normalized
-            await self._record_message(message.username)
+        # The timestamp is always recorded; the prefix is applied only when the
+        # announce window elapsed AND the user is not on the no-announce list.
+        announce = await self._claim_announcement(message.username)
+        if announce and message.username.lower() not in self._no_announce_users:
+            final_text = _ANNOUNCEMENTS[lang].format(
+                username=message.username, text=normalized
+            )
+            LOGGER.debug("Announcing prefix for %s (outside window)", message.username)
+        else:
+            final_text = normalized
 
         await self._synthesize_and_broadcast(
-            message.username,
-            final_text,
-            voice,
-            lang,
-            message.emote_names,
-            emoji_items,
-            message.avatar_url,
+            username=message.username,
+            final_text=final_text,
+            voice=voice,
+            lang=lang,
+            emote_names=message.emote_names,
+            emoji_items=emoji_items,
+            avatar_url=message.avatar_url,
         )
 
     async def handle(self, message: QueuedMessage) -> None:
@@ -671,7 +668,7 @@ class MessageHandler:
     async def process_queue(self) -> None:
         """Continuously drain the message queue, invoking handle() for each QueuedMessage.
 
-        Runs as one of the four concurrent tasks started by asyncio.gather() in __init__.py.
+        Runs as one of the four concurrent tasks started by the asyncio.TaskGroup in __init__.py.
         Errors in handle() are logged and swallowed so a bad message never kills the loop.
         task_done() is always called so Queue.join() (if ever used) doesn't hang.
         """

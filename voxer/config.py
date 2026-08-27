@@ -1,11 +1,12 @@
 """Environment-variable configuration for twitch-voxer.
 
 All runtime settings are read from environment variables (populated from a
-.env file via python-dotenv).  Module-level constants are set at import time
-so that any misconfiguration surfaces immediately on startup rather than at
-the first use of a value.
+.env file via python-dotenv) into module-level constants at import time.
 
-Required variables raise RuntimeError if missing.
+Required variables default to "" at import time; call validate_required()
+once at startup (the composition root does this) to fail fast with a message
+that lists ALL missing variables at once.  Deferring the check keeps
+`import voxer.handler` (e.g. in tests) from requiring real credentials.
 Optional variables fall back to sensible defaults.
 """
 
@@ -13,27 +14,40 @@ import os
 
 from dotenv import load_dotenv
 
-# Load .env into os.environ before any _require() call reads from it.
+# Load .env into os.environ before any constant below reads from it.
 # Has no effect if the file does not exist (harmless in Docker/CI).
 load_dotenv()
 
-
-def _require(key: str) -> str:
-    """Read a required environment variable, raising clearly if it is absent."""
-    value = os.getenv(key)
-    if value is None:
-        raise RuntimeError(f"Required environment variable {key!r} is not set")
-    return value
-
-
 # ── Twitch API credentials (all required) ────────────────────────────────────
 # These belong to the *bot* Twitch account, not the broadcaster's account.
-CLIENT_ID: str     = _require("TWITCH_CLIENT_ID")
-CLIENT_SECRET: str = _require("TWITCH_CLIENT_SECRET")
+CLIENT_ID: str     = os.getenv("TWITCH_CLIENT_ID", "")
+CLIENT_SECRET: str = os.getenv("TWITCH_CLIENT_SECRET", "")
 # Access + refresh tokens are stored from the initial OAuth flow.
 # twitchio handles automatic token refresh using the refresh token.
-ACCESS_TOKEN: str  = _require("TWITCH_ACCESS_TOKEN")
-REFRESH_TOKEN: str = _require("TWITCH_REFRESH_TOKEN")
+ACCESS_TOKEN: str  = os.getenv("TWITCH_ACCESS_TOKEN", "")
+REFRESH_TOKEN: str = os.getenv("TWITCH_REFRESH_TOKEN", "")
+
+# Names of the environment variables that must be non-empty for the bot to run.
+_REQUIRED_VARS: tuple[str, ...] = (
+    "TWITCH_CLIENT_ID",
+    "TWITCH_CLIENT_SECRET",
+    "TWITCH_ACCESS_TOKEN",
+    "TWITCH_REFRESH_TOKEN",
+)
+
+
+def validate_required() -> None:
+    """Raise RuntimeError listing every required environment variable that is unset.
+
+    Called once by the composition root before any component starts, so a
+    misconfigured deployment fails immediately with a complete list instead
+    of one variable at a time.
+    """
+    missing = [key for key in _REQUIRED_VARS if not os.getenv(key)]
+    if missing:
+        raise RuntimeError(
+            "Required environment variables are not set: " + ", ".join(missing)
+        )
 # Login name (slug) of the bot Twitch account, used to look up its numeric ID.
 BOT_USERNAME: str  = str(os.getenv("TWITCH_BOT_USERNAME", "worxbend"))
 
@@ -56,8 +70,16 @@ SERVER_PORT: int = int(os.getenv("VOXER_SERVER_PORT", "8080"))
 # How long to wait before sending the first scheduled message (lets the bot
 # finish its EventSub handshake before posting to chat).
 SCHEDULER_INITIAL_DELAY: int = int(os.getenv("VOXER_SCHEDULER_INITIAL_DELAY", "10"))
-# Fallback retry delay when no scheduled messages are available.
-SCHEDULER_INTERVAL: int      = int(os.getenv("VOXER_SCHEDULER_INTERVAL", "600"))
+# How long to wait before re-checking when the message list is empty or invalid.
+# The normal posting cadence is NOT this value — it is derived from each
+# message's frequency_per_hour in data/messages.json.
+# VOXER_SCHEDULER_INTERVAL is accepted as a deprecated alias of the new name.
+SCHEDULER_EMPTY_RETRY_DELAY: int = int(
+    os.getenv(
+        "VOXER_SCHEDULER_EMPTY_RETRY_DELAY",
+        os.getenv("VOXER_SCHEDULER_INTERVAL", "600"),
+    )
+)
 
 # ── Announcement behaviour ────────────────────────────────────────────────────
 # Time window (seconds) during which a user's name is NOT re-announced.
