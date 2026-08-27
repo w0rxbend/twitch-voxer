@@ -27,7 +27,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .handler import BroadcastEvent
+from .models import BroadcastEvent
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -93,6 +93,11 @@ class AudioServer:
                     except json.JSONDecodeError:
                         LOGGER.warning("Received malformed WS message: %r", data)
                         continue
+                    if not isinstance(message, dict):
+                        # Valid JSON but not an object (e.g. 42, null, [1]) —
+                        # calling .get() on it would crash this client's handler
+                        LOGGER.warning("Received non-object WS message: %r", data)
+                        continue
                     if filename := message.get("done"):
                         # Path-traversal guard: only allow deletion of files that are
                         # direct children of audio_dir (no ../ or absolute paths).
@@ -136,7 +141,10 @@ class AudioServer:
         # dataclasses.asdict() recursively converts nested dataclasses (e.g. EmoteItem)
         message = json.dumps(dataclasses.asdict(event))
         dead: set[WebSocket] = set()
-        for ws in self._clients:
+        # Iterate over a snapshot: each send awaits, and during that await the
+        # event loop can run ws_endpoint, which adds/removes clients — mutating
+        # the live set mid-iteration would raise RuntimeError.
+        for ws in list(self._clients):
             try:
                 await ws.send_text(message)
             except Exception:
@@ -149,7 +157,7 @@ class AudioServer:
     async def serve(self) -> None:
         """Start the uvicorn server and block until shutdown.
 
-        Runs as one of the four concurrent tasks in asyncio.gather().
+        Runs as one of the four concurrent tasks in the composition root's asyncio.TaskGroup.
         uvicorn's own logging is silenced (log_level="warning") because
         colorlog handles all application-level output.
         """

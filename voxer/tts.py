@@ -100,7 +100,13 @@ class TTSService:
         # the caller is responsible for cleanup.
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             path = Path(tmp.name)
-        self._tts.save_audio(wav, str(path))
+        try:
+            self._tts.save_audio(wav, str(path))
+        except BaseException:
+            # save_audio failed (disk full, codec error) — remove the temp file
+            # ourselves, because the caller never gets a path to clean up
+            path.unlink(missing_ok=True)
+            raise
         LOGGER.debug("WAV saved: %s", path)
         return path
 

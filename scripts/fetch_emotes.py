@@ -144,8 +144,16 @@ def oauth_flow(session: requests.Session) -> str:
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            # Extract the `code` parameter from the redirect URL query string
+            # Extract the `code` parameter from the redirect URL query string.
+            # The `state` must match the one we generated — this is the CSRF
+            # (cross-site request forgery) guard: without the check, any page in
+            # the browser could hit localhost and inject an attacker's code.
             params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if params.get("state", [None])[0] != state:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"<h1>Invalid state parameter.</h1>")
+                return
             if "code" in params:
                 code_holder["code"] = params["code"][0]
             self.send_response(200)
@@ -153,7 +161,7 @@ def oauth_flow(session: requests.Session) -> str:
             self.end_headers()
             self.wfile.write(b"<h1>Authorized! You can close this tab.</h1>")
 
-        def log_message(self, *_: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             # Suppress the default per-request log lines from BaseHTTPRequestHandler
             pass
 
@@ -336,7 +344,9 @@ def main() -> None:
                     continue  # keep the first occurrence (usually the global emote)
                 seen.add(name)
                 imgs = emote["images"]
-                db.set(name, {"url_1x": imgs["url_1x"], "url_2x": imgs["url_2x"], "url_4x": imgs["url_4x"]})
+                # pickledb's set() is a dual sync/async method; outside an event
+                # loop it runs synchronously, so the "coroutine" is never awaited
+                _ = db.set(name, {"url_1x": imgs["url_1x"], "url_2x": imgs["url_2x"], "url_4x": imgs["url_4x"]})
 
         print(f"Saved to {OUTPUT_FILE} ({len(seen)} unique emotes)")
 
