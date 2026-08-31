@@ -1,8 +1,17 @@
 # One-command deployment: `docker compose up -d --build`
 #
-# Requires a `.env` file next to this compose file (copy .env.example and fill
-# in the four TWITCH_* credentials).  All secrets come from that file via
-# `env_file`; the `environment` block below only overrides container paths.
+# Requires a `.env` file next to this compose file (copy .env.example).  Only
+# TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are needed — on the first
+# `docker compose up` the bot logs an authorization URL; open it once in a
+# browser to sign in with the bot account.  The resulting tokens are saved
+# under ./data and survive restarts, so this is a one-time step.
+#
+# Before the FIRST `docker compose up`, create the state directory yourself:
+#   mkdir -p data
+# If Docker creates it instead, it is owned by root and the container user
+# (UID 1000) cannot write tokens or databases into it.
+# All secrets come from `.env` via `env_file`; the `environment` block below
+# only overrides container paths and bind addresses.
 #
 # To only build the image (tagged twitch-voxer:latest) without starting it:
 #   docker compose build
@@ -24,8 +33,16 @@ services:
       platforms:
         - linux/amd64
         - linux/arm64
+    # Run a tiny init process as PID 1 so signals are forwarded and zombie
+    # processes are reaped.
+    init: true
     ports:
       - "8080:8080"
+      # One-time OAuth callback used on first start: the bot prints a URL,
+      # you open it once, tokens are saved to ./data.  Register
+      # http://localhost:4343/oauth/callback as the redirect URL in the
+      # Twitch dev console (https://dev.twitch.tv/console/apps).
+      - "4343:4343"
     env_file: .env
     environment:
       VOXER_DB_PATH: /data/voices.json
@@ -34,13 +51,21 @@ services:
       VOXER_AUDIO_DIR: /data/audio
       VOXER_SERVER_HOST: "0.0.0.0"
       VOXER_SERVER_PORT: "8080"
+      # Bind the OAuth callback server on all interfaces so the published
+      # 4343 port above can reach it.
+      VOXER_OAUTH_HOST: "0.0.0.0"
+      VOXER_TOKEN_FILE: /data/tokens.json
     volumes:
-      # Persistent state: voice assignments, timestamps, scheduled messages, audio
+      # Persistent state: voice assignments, timestamps, scheduled messages,
+      # generated audio — and now also the OAuth tokens (tokens.json)
       - ./data:/data
-      # Custom voice styles and emote assets are read from the repo, read-only —
-      # the image itself does not bundle them
-      - ./voices:/app/voices:ro
-      - ./emotes:/app/emotes:ro
+      # The image bundles default voice styles and emote sounds; uncomment
+      # to override them with your local copies instead.  Note: the emote
+      # image cache (emotes/emotes.db) is NOT baked into the image — generate
+      # it on the host with `uv run voxer-fetch-emotes` and uncomment the
+      # emotes mount if you want emote images in the overlay.
+      # - ./voices:/app/voices:ro
+      # - ./emotes:/app/emotes:ro
       # Supertonic model cache — survives rebuilds so the ~100 MB model is
       # downloaded only once
       - tts-cache:/home/voxer/.cache

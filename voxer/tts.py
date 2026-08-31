@@ -24,6 +24,10 @@ from supertonic import TTS
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
+# Voice identifiers that ship with the Supertonic engine itself.  Custom voices
+# loaded from voices/*.json are appended to these by the voice_names property.
+BUILTIN_VOICES: list[str] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
+
 
 class TTSService:
     """Thin wrapper around Supertonic TTS with a voice-style cache."""
@@ -66,9 +70,14 @@ class TTSService:
                 LOGGER.warning("Failed to load custom voice %s: %s", name, exc)
 
     @property
-    def custom_voice_names(self) -> list[str]:
-        """Names of successfully loaded custom voices (read-only snapshot)."""
-        return list(self._custom_voice_names)
+    def voice_names(self) -> list[str]:
+        """Every voice this engine can speak with: built-ins plus custom voices.
+
+        Returned as a fresh list so callers cannot mutate the engine's state.
+        This is the single place that knows the full pool; the composition root
+        hands it to VoiceStore, which owns assignment of a voice to a chatter.
+        """
+        return BUILTIN_VOICES + self._custom_voice_names
 
     def _voice_style(self, voice_name: str) -> Any:
         """Return the cached style object for voice_name, loading it on first access."""
@@ -77,7 +86,7 @@ class TTSService:
             self._voice_cache[voice_name] = self._tts.get_voice_style(voice_name=voice_name)
         return self._voice_cache[voice_name]
 
-    def save_wav(self, text: str, voice_name: str = "F3", lang: str = "uk") -> Path:
+    def save_wav(self, text: str, *, voice_name: str, lang: str) -> Path:
         """Synthesize text to speech and save as a temporary WAV file.
 
         This method is synchronous and CPU-bound.  Callers must run it via
@@ -88,8 +97,8 @@ class TTSService:
 
         Args:
             text: Text to synthesize (may include Supertonic expression tags like <laugh>).
-            voice_name: Voice style identifier (default: "F3").
-            lang: BCP-47 language code (default: "uk" for Ukrainian).
+            voice_name: Voice style identifier (e.g. "F3" or a custom voice name).
+            lang: BCP-47 language code (e.g. "uk", "en").
 
         Returns:
             Path to the generated temporary WAV file.

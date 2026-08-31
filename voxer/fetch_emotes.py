@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """One-shot script to fetch and cache Twitch emotes into a local pickledb file.
 
 Run this once (or periodically) to populate emotes/emotes.db, which the bot
@@ -15,16 +14,26 @@ is {"url_1x": "...", "url_2x": "...", "url_4x": "..."}.
 Authentication:
   The script needs both an app token (client credentials flow, for most API
   calls) and a user token with `user:read:follows` and `moderator:read:followers`
-  scopes (to list followed/follower channels).  It tries to refresh an existing
-  token from TWITCH_REFRESH_TOKEN first; if that fails or the token lacks the
-  required scopes it runs a local OAuth callback server to get a fresh one.
+  scopes (to list followed/follower channels).  In order it tries:
+    1. The bot's shared token file (VOXER_TOKEN_FILE, default data/tokens.json)
+       written by the main app's OAuth flow — the stored access token is used
+       while still valid; only a dead one is refreshed, with the rotated pair
+       written back atomically so it stays usable by the bot.
+    2. The TWITCH_REFRESH_TOKEN env var, if set.
+    3. A local OAuth callback server plus browser flow as the last resort.
 
 Usage:
     uv run voxer-fetch-emotes   (after `uv sync`)
-    python scripts/fetch_emotes.py
+    python -m voxer.fetch_emotes
+
+This module is part of the `voxer` package (it reads credentials from
+voxer.config), so it must be run with `-m` rather than as a bare file path —
+`python voxer/fetch_emotes.py` cannot resolve the package-relative import.
 """
 
+import datetime
 import http.server
+import json
 import os
 import secrets
 import time
@@ -33,9 +42,8 @@ import webbrowser
 import pickledb
 import requests
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
+from . import config
 
 
 def _require_env(key: str) -> str:
@@ -48,10 +56,15 @@ def _require_env(key: str) -> str:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-CLIENT_ID: str      = _require_env("TWITCH_CLIENT_ID")
-CLIENT_SECRET: str  = _require_env("TWITCH_CLIENT_SECRET")
-# Optional: if set, the script tries to refresh this token before the full OAuth flow
-REFRESH_TOKEN: str | None = os.environ.get("TWITCH_REFRESH_TOKEN")
+# Credentials come from voxer.config, which is the single place that reads .env
+# and owns the variable names.  They are read leniently there (defaulting to "")
+# so this module imports cleanly in tests; main() re-checks them via
+# _require_env() to fail fast with a clear message.
+CLIENT_ID: str      = config.CLIENT_ID
+CLIENT_SECRET: str  = config.CLIENT_SECRET
+# Optional: if set, the script tries to refresh this token before the full OAuth
+# flow.  Empty string when unset, so every check on it must be a truthiness test.
+REFRESH_TOKEN: str  = config.REFRESH_TOKEN
 
 BASE_URL = "https://api.twitch.tv/helix"
 # The local redirect URI that Twitch sends the authorization code to.
@@ -60,6 +73,11 @@ REDIRECT_URI = "http://localhost:1337/api/connect/twitch/callback"
 # Minimum scopes needed to list followed and follower channels
 SCOPES = ["user:read:follows", "moderator:read:followers"]
 OUTPUT_FILE = Path("emotes/emotes.db")
+# The main app persists its OAuth tokens here (twitchio JSON format:
+# {user_id: {"user_id", "token", "refresh", "last_validated"}}).  Reusing it
+# means this script needs no OAuth flow of its own once the bot has run once.
+# config.TOKEN_FILE is a str; this module treats it as a Path throughout.
+TOKEN_FILE = Path(config.TOKEN_FILE)
 
 
 # ── Authentication helpers ────────────────────────────────────────────────────
@@ -78,6 +96,103 @@ def get_app_token(session: requests.Session) -> str:
     return resp.json()["access_token"]
 
 
+def _refresh_grant(session: requests.Session, refresh_token: str) -> dict | None:
+    """Exchange a refresh token for a new token pair via POST /oauth2/token.
+
+    Returns the token-endpoint response dict ({"access_token", "refresh_token",
+    ...}) or None when the refresh token is expired or revoked.
+    """
+    try:
+        resp = session.post(
+            "https://id.twitch.tv/oauth2/token",
+            params={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": CLIENT_ID,
+                "client_secret": CLIENT_SECRET,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except requests.HTTPError:
+        return None
+
+
+def _write_tokens_atomically(tokens: dict, fresh_refresh: str) -> None:
+    """Replace TOKEN_FILE with the rotated pair without risking a truncated file.
+
+    Writes to a temp file in the same directory, fsyncs, then os.replace()s it
+    over the original — a crash mid-write can therefore never destroy the only
+    copy of the credentials.  If even that fails, the fresh refresh token is
+    printed so it can be recovered manually.
+    """
+    tmp = TOKEN_FILE.with_suffix(".tmp")
+    try:
+        with open(tmp, "w") as fp:
+            json.dump(tokens, fp)
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(tmp, TOKEN_FILE)
+    except OSError as exc:
+        print(f"  Warning: could not write rotated tokens back to {TOKEN_FILE}: {exc}")
+        print("  Save this refresh token manually or re-run the bot's OAuth flow:")
+        print(f"    {fresh_refresh}")
+
+
+def refresh_from_token_file(
+    session: requests.Session, needed: set[str] | None = None
+) -> str | None:
+    """Obtain a valid access token from the bot's shared token file.
+
+    The stored access token is reused as-is while it is still alive AND carries
+    the scopes this script needs — refreshing would needlessly rotate the
+    refresh token and, if the bot is running at the same time, strand the pair
+    the bot holds in memory.  A dead or under-scoped access token triggers a
+    refresh, in which case the rotated pair is written back atomically
+    (otherwise the bot's next refresh would fail with a stale token).
+
+    Args:
+        session: HTTP session used for the validate/refresh calls.
+        needed: Scopes the returned token must carry.  Defaults to SCOPES.
+
+    Returns:
+        The access token, or None when the file is missing, unreadable, or
+        every stored credential is dead.
+    """
+    needed = set(SCOPES) if needed is None else needed
+    try:
+        tokens: dict[str, dict] = json.loads(TOKEN_FILE.read_text())
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+    if not isinstance(tokens, dict):
+        return None
+
+    for user_id, entry in tokens.items():
+        if not isinstance(entry, dict):
+            continue
+        # Prefer the stored access token while it is still usable — no rotation.
+        # It must carry every needed scope: a token that merely validates would
+        # otherwise be returned here and then rejected by the caller's own check.
+        stored = entry.get("token")
+        if stored and token_has_scopes(session, stored, needed):
+            return stored
+        refresh = entry.get("refresh")
+        if not refresh:
+            continue
+        fresh = _refresh_grant(session, refresh)
+        if not fresh:
+            continue
+        tokens[user_id] = {
+            "user_id": user_id,
+            "token": fresh["access_token"],
+            "refresh": fresh["refresh_token"],
+            "last_validated": datetime.datetime.now().isoformat(),
+        }
+        _write_tokens_atomically(tokens, fresh["refresh_token"])
+        return fresh["access_token"]
+    return None
+
+
 def refresh_user_token(session: requests.Session) -> str | None:
     """Try to exchange the stored refresh token for a new access token.
 
@@ -86,20 +201,8 @@ def refresh_user_token(session: requests.Session) -> str | None:
     """
     if not REFRESH_TOKEN:
         return None
-    try:
-        resp = session.post(
-            "https://id.twitch.tv/oauth2/token",
-            params={
-                "grant_type": "refresh_token",
-                "refresh_token": REFRESH_TOKEN,
-                "client_id": CLIENT_ID,
-                "client_secret": CLIENT_SECRET,
-            },
-        )
-        resp.raise_for_status()
-        return resp.json()["access_token"]
-    except requests.HTTPError:
-        return None
+    fresh = _refresh_grant(session, REFRESH_TOKEN)
+    return fresh["access_token"] if fresh else None
 
 
 def validate_token_scopes(session: requests.Session, token: str) -> set[str]:
@@ -111,6 +214,18 @@ def validate_token_scopes(session: requests.Session, token: str) -> set[str]:
     if resp.status_code != 200:
         return set()
     return set(resp.json().get("scopes", []))
+
+
+def token_has_scopes(
+    session: requests.Session, token: str, needed: set[str]
+) -> bool:
+    """Return True when token is valid AND carries every scope in needed.
+
+    A token that validates but lacks a scope is useless to this script, so the
+    two questions ("is it alive?" and "can it do what we need?") are answered
+    together rather than letting a live-but-under-scoped token pass as good.
+    """
+    return needed.issubset(validate_token_scopes(session, token))
 
 
 def oauth_flow(session: requests.Session) -> str:
@@ -200,20 +315,29 @@ def get_user_token(session: requests.Session) -> str:
     """Return a valid user token with the required scopes.
 
     Strategy:
-      1. Attempt to refresh the stored TWITCH_REFRESH_TOKEN.
-      2. If the refreshed token is valid and has all required scopes, return it.
+      1. Refresh from the bot's shared token file (written by the main app's
+         OAuth flow — its scope set includes everything this script needs).
+      2. Attempt to refresh the stored TWITCH_REFRESH_TOKEN env var.
       3. Otherwise run the full OAuth flow in the browser.
+    A refreshed token is used only when it carries all required scopes.
     """
-    token = refresh_user_token(session)
-    if token:
+    needed = set(SCOPES)
+    # Lazy callables: a later source must not be refreshed (Twitch rotates the
+    # refresh token on every use) when an earlier one already succeeded.
+    sources = (
+        (f"token file {TOKEN_FILE}", refresh_from_token_file),
+        ("TWITCH_REFRESH_TOKEN", refresh_user_token),
+    )
+    for source, fetch in sources:
+        token = fetch(session)
+        if not token:
+            continue
         scopes = validate_token_scopes(session, token)
-        needed = set(SCOPES)
         if needed.issubset(scopes):
+            print(f"  Using token refreshed from {source}")
             return token
-        missing = needed - scopes
-        print(f"  Refreshed token is missing scopes: {missing}. Running OAuth flow...")
-    else:
-        print("  Could not refresh token. Running OAuth flow...")
+        print(f"  Token from {source} is missing scopes: {needed - scopes}")
+    print("  No reusable token found. Running OAuth flow...")
     return oauth_flow(session)
 
 
@@ -294,6 +418,8 @@ def main() -> None:
     Duplicate emote names (same name in multiple channels) are deduplicated
     by keeping the first occurrence — typically the global version.
     """
+    for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"):
+        _require_env(key)
     OUTPUT_FILE.parent.mkdir(exist_ok=True)
 
     with requests.Session() as session:

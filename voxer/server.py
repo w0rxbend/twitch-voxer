@@ -35,6 +35,19 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 _STATIC_DIR = Path(__file__).parent / "static"
 
 
+def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
+    """Resolve a client-supplied audio filename to a path inside audio_dir.
+
+    Returns None for anything that would escape the directory (path traversal
+    via "../", absolute paths, subdirectories) — the client controls this
+    string, so it must never be trusted to address arbitrary files.
+    """
+    path = (audio_dir / filename).resolve()
+    if path.parent != audio_dir.resolve():
+        return None
+    return path
+
+
 class AudioServer:
     """Starlette-based HTTP + WebSocket server for audio delivery to the browser overlay."""
 
@@ -101,8 +114,8 @@ class AudioServer:
                     if filename := message.get("done"):
                         # Path-traversal guard: only allow deletion of files that are
                         # direct children of audio_dir (no ../ or absolute paths).
-                        path = (self._audio_dir / filename).resolve()
-                        if path.parent == self._audio_dir.resolve():
+                        path = resolve_audio_file(self._audio_dir, filename)
+                        if path is not None:
                             path.unlink(missing_ok=True)
                             LOGGER.debug("Cleaned up audio file: %s", filename)
                         else:
@@ -157,7 +170,8 @@ class AudioServer:
     async def serve(self) -> None:
         """Start the uvicorn server and block until shutdown.
 
-        Runs as one of the four concurrent tasks in the composition root's asyncio.TaskGroup.
+        Runs as one of the long-running tasks in the composition root's
+        asyncio.TaskGroup (voxer/app.py).
         uvicorn's own logging is silenced (log_level="warning") because
         colorlog handles all application-level output.
         """

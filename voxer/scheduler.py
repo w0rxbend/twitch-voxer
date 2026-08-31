@@ -112,8 +112,13 @@ class Scheduler:
             if not parsed:
                 LOGGER.warning("No valid scheduled messages found in DB")
             return parsed
-        except Exception as exc:
-            LOGGER.error("Failed to load messages: %s", exc)
+        except Exception:
+            # Deliberately broad: run() calls this with no try of its own, and
+            # run() is a task in the composition root's TaskGroup — an escaping
+            # exception would cancel its siblings and take the whole bot down.
+            # Log with a traceback so a bug here is diagnosable rather than
+            # showing up only as a scheduler that silently stops posting.
+            LOGGER.exception("Failed to load messages")
             return []
 
     def _choose_message(self, messages: list[ScheduledMessage]) -> ScheduledMessage:
@@ -129,7 +134,8 @@ class Scheduler:
     async def run(self) -> None:
         """Continuously post random scheduled messages to chat.
 
-        Runs as one of the four concurrent tasks started by the asyncio.TaskGroup in __init__.py.
+        Runs as one of the long-running tasks in the composition root's
+        asyncio.TaskGroup (voxer/app.py).
         The initial_delay gives the bot time to finish the EventSub handshake and token
         validation before attempting to post chat messages.
         """

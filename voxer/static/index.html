@@ -103,86 +103,73 @@
       animation: scan-drift 720ms steps(8) infinite;
     }
 
-    #now-playing {
+    #np-card {
       position: fixed;
       right: 28px;
       bottom: 28px;
       display: flex;
       align-items: center;
       gap: 12px;
-      max-width: min(420px, calc(100vw - 32px));
-      min-height: 58px;
-      padding: 11px 22px 11px 14px;
-      overflow: hidden;
+      max-width: min(480px, calc(100vw - 32px));
+      padding: 10px 20px 10px 10px;
       color: #fff;
-      background:
-        linear-gradient(135deg, rgba(11, 18, 26, 0.78), rgba(18, 14, 28, 0.7)),
-        linear-gradient(90deg, rgba(85, 230, 255, 0.26), rgba(255, 79, 216, 0.18));
+      background: rgba(12, 17, 26, 0.62);
+      backdrop-filter: blur(14px) saturate(1.3);
+      -webkit-backdrop-filter: blur(14px) saturate(1.3);
       border: 1px solid rgba(255, 255, 255, 0.16);
-      border-radius: 999px;
+      border-radius: 18px;
       box-shadow:
         0 18px 40px rgba(0, 0, 0, 0.38),
         0 0 32px rgba(85, 230, 255, 0.18);
       opacity: 0;
       pointer-events: none;
-      transform: translate3d(0, 10px, 0) scale(0.98);
-      transition: opacity 260ms ease, transform 360ms cubic-bezier(0.2, 0.9, 0.2, 1);
-      z-index: 5;
+      z-index: 30;
     }
 
-    #now-playing.visible {
+    #np-card.visible {
       opacity: 1;
-      transform: translate3d(0, 0, 0) scale(1);
+      animation: np-enter 250ms cubic-bezier(0.2, 0.9, 0.2, 1) both;
     }
 
-    #now-playing::before {
-      position: absolute;
-      inset: -2px;
-      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
-      content: "";
-      opacity: 0;
-      transform: translateX(-120%);
+    #np-card.leaving {
+      animation: np-exit 250ms ease both;
     }
 
-    #now-playing.visible::before {
-      animation: shine 1.8s ease-in-out infinite;
+    @keyframes np-enter {
+      from {
+        opacity: 0;
+        transform: translateY(12px) scale(0.97);
+      }
+
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
     }
 
-    #speaker-icon {
-      position: relative;
-      display: grid;
-      width: 38px;
-      height: 38px;
-      flex: 0 0 38px;
-      place-items: center;
+    @keyframes np-exit {
+      from {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+
+      to {
+        opacity: 0;
+        transform: translateY(12px) scale(0.97);
+      }
     }
 
-    #speaker-icon img {
-      width: 34px;
-      height: 34px;
-      filter: drop-shadow(0 0 12px rgba(85, 230, 255, 0.72));
-    }
-
-    #np-avatar {
-      display: none;
+    #np-card .np-avatar {
+      width: 44px;
+      height: 44px;
+      flex: 0 0 44px;
       border: 1px solid rgba(255, 255, 255, 0.3);
       border-radius: 50%;
       object-fit: cover;
+      box-shadow: 0 0 14px rgba(85, 230, 255, 0.42);
     }
 
-    #now-playing.has-avatar #np-fallback-icon {
-      display: none;
-    }
-
-    #now-playing.has-avatar #np-avatar {
-      display: block;
-    }
-
-    #now-playing.visible #speaker-icon {
-      animation: icon-pulse 420ms ease-in-out infinite alternate;
-    }
-
-    #np-username {
+    #np-card .np-username {
       min-width: 0;
       overflow: hidden;
       font-size: 18px;
@@ -191,6 +178,74 @@
       text-overflow: ellipsis;
       text-shadow: 0 1px 8px rgba(0, 0, 0, 0.72);
       white-space: nowrap;
+    }
+
+    #np-card .np-emotes {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    #np-card .np-emotes img {
+      width: 24px;
+      height: 24px;
+      object-fit: contain;
+    }
+
+    #status-pill {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: #dfe8f2;
+      background: rgba(12, 17, 26, 0.62);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 999px;
+      pointer-events: none;
+      z-index: 40;
+    }
+
+    #status-pill .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ff5f6d;
+    }
+
+    #status-pill .dot[data-state="connected"] {
+      background: #4be38a;
+      box-shadow: 0 0 8px rgba(75, 227, 138, 0.7);
+    }
+
+    #status-pill .dot[data-state="reconnecting"] {
+      background: var(--amber);
+    }
+
+    #autoplay-hint {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      font-weight: 600;
+      color: #fff;
+      text-shadow: 0 2px 12px rgba(0, 0, 0, 0.8);
+      background: rgba(5, 8, 12, 0.55);
+      z-index: 100;
+      cursor: pointer;
+    }
+
+    #autoplay-hint.visible {
+      display: flex;
     }
 
     @keyframes energy-breathe {
@@ -208,28 +263,6 @@
     @keyframes scan-drift {
       to {
         transform: translate(-50%, calc(-50% + 14px));
-      }
-    }
-
-    @keyframes shine {
-      10%,
-      100% {
-        opacity: 0;
-        transform: translateX(120%);
-      }
-
-      24% {
-        opacity: 1;
-      }
-    }
-
-    @keyframes icon-pulse {
-      from {
-        transform: scale(0.96);
-      }
-
-      to {
-        transform: scale(1.08);
       }
     }
 
@@ -279,15 +312,14 @@
         height: min(54vh, 380px);
       }
 
-      #now-playing {
+      #np-card {
         right: 16px;
         bottom: 16px;
         max-width: calc(100vw - 32px);
-        min-height: 52px;
-        padding-right: 18px;
+        padding-right: 16px;
       }
 
-      #np-username {
+      #np-card .np-username {
         font-size: 16px;
       }
     }
@@ -303,35 +335,27 @@
 
 <div id="emote-layer" aria-hidden="true"></div>
 
-<div id="now-playing">
-  <span id="speaker-icon">
-    <img id="np-fallback-icon" src="/static/speaker.svg" alt="">
-    <img id="np-avatar" alt="">
-  </span>
-  <span id="np-username"></span>
+<div id="np-card">
+  <img class="np-avatar" src="/static/speaker.svg" alt=""
+       onerror="this.onerror=null;this.src='/static/speaker.svg';">
+  <span class="np-username"></span>
+  <span class="np-emotes"></span>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js"></script>
-<script type="module">
-  const RECONNECT_BASE_MS = 1000;
-  const RECONNECT_MAX_MS = 30000;
-  const queue = [];
+<div id="status-pill">
+  <span class="dot"></span>
+  <span class="txt">disconnected</span>
+</div>
 
-  let isPlaying = false;
-  let ws = null;
-  let reconnectDelay = RECONNECT_BASE_MS;
+<div id="autoplay-hint">Click anywhere to enable audio</div>
+
+<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js"></script>
+<script src="/static/overlay.js?v=1"></script>
+<script type="module">
   let THREE = null;
   let GLTFLoader = null;
 
   const visualizer = document.getElementById("visualizer");
-  const nowPlaying = document.getElementById("now-playing");
-  const npAvatar = document.getElementById("np-avatar");
-  const npUsername = document.getElementById("np-username");
-
-  npAvatar.addEventListener("error", () => {
-    npAvatar.removeAttribute("src");
-    nowPlaying.classList.remove("has-avatar");
-  });
 
   const visualState = {
     active: false,
@@ -665,57 +689,53 @@
     }
   }
 
-  function showSpeaker(username, emotes, avatarUrl) {
-    npUsername.textContent = "@" + username;
-    if (avatarUrl) {
-      npAvatar.src = avatarUrl;
-      nowPlaying.classList.add("has-avatar");
-    } else {
-      npAvatar.removeAttribute("src");
-      nowPlaying.classList.remove("has-avatar");
-    }
-    nowPlaying.classList.add("visible");
-    triggerVisuals();
-    spawnEmotes(emotes);
-  }
+  // One shared AudioContext + analyser for every played message.  A context
+  // per element would accumulate (browsers cap live AudioContexts and each
+  // holds audio-thread resources); instead each element gets only its own
+  // MediaElementSource, connected on play and disconnected when it settles.
+  const reactivity = { context: null, analyser: null, data: null };
 
-  function hideSpeaker() {
-    nowPlaying.classList.remove("visible");
-    relaxVisuals();
-  }
-
-  function notifyDone(url) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ done: url.split("/").pop() }));
-    }
+  function ensureAnalyser() {
+    if (reactivity.context) return true;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return false;
+    reactivity.context = new AudioContext();
+    reactivity.analyser = reactivity.context.createAnalyser();
+    reactivity.analyser.fftSize = 128;
+    reactivity.analyser.smoothingTimeConstant = 0.72;
+    reactivity.analyser.connect(reactivity.context.destination);
+    reactivity.data = new Uint8Array(reactivity.analyser.frequencyBinCount);
+    return true;
   }
 
   function connectAudioReactivity(audio) {
-    const AudioContext = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContext) return;
-
     try {
-      const audioContext = new AudioContext();
-      const analyser = audioContext.createAnalyser();
-      const source = audioContext.createMediaElementSource(audio);
-      const data = new Uint8Array(analyser.frequencyBinCount);
+      if (!ensureAnalyser()) return;
+      const source = reactivity.context.createMediaElementSource(audio);
+      source.connect(reactivity.analyser);
 
-      analyser.fftSize = 128;
-      analyser.smoothingTimeConstant = 0.72;
-      source.connect(analyser);
-      analyser.connect(audioContext.destination);
+      function disconnect() {
+        try { source.disconnect(); } catch (e) { /* already disconnected */ }
+      }
+      audio.addEventListener("ended", disconnect, { once: true });
+      audio.addEventListener("error", disconnect, { once: true });
 
       function sample() {
-        if (!visualState.active) return;
-        analyser.getByteFrequencyData(data);
-        const lowBins = data.slice(0, 14);
+        // Loop for the lifetime of this audio element rather than reading
+        // visualState.active: the "play" event can fire before the runtime
+        // has invoked onPlayStart (which sets visualState.active).
+        // `paused` covers the runtime's watchdog, which pauses a stalled
+        // element — without it this rAF loop would never exit.
+        if (audio.ended || audio.error || audio.paused) { disconnect(); return; }
+        reactivity.analyser.getByteFrequencyData(reactivity.data);
+        const lowBins = reactivity.data.slice(0, 14);
         const sum = lowBins.reduce((total, value) => total + value, 0);
         visualState.bass = clamp(sum / (lowBins.length * 255), 0.08, 1);
         requestAnimationFrame(sample);
       }
 
       audio.addEventListener("play", () => {
-        audioContext.resume();
+        reactivity.context.resume();
         sample();
       }, { once: true });
     } catch (error) {
@@ -723,68 +743,16 @@
     }
   }
 
-  function playNext() {
-    if (isPlaying || queue.length === 0) return;
-    const { audio_url, username, avatar_url, emotes } = queue.shift();
-    isPlaying = true;
-    const fullUrl = location.origin + audio_url;
-    console.log(`[${username}] ${fullUrl}`, emotes?.map(e => e.name));
-    showSpeaker(username, emotes, avatar_url);
-
-    const audio = new Audio(fullUrl);
-    connectAudioReactivity(audio);
-
-    audio.onended = () => {
-      notifyDone(audio_url);
-      isPlaying = false;
-      hideSpeaker();
-      playNext();
-    };
-
-    audio.onerror = () => {
-      console.error(`Failed to play: ${fullUrl}`);
-      notifyDone(audio_url);
-      isPlaying = false;
-      hideSpeaker();
-      playNext();
-    };
-
-    audio.play().catch((error) => {
-      console.error("Playback failed:", error);
-      notifyDone(audio_url);
-      isPlaying = false;
-      hideSpeaker();
-      playNext();
-    });
-  }
-
-  function connect() {
-    const protocol = location.protocol === "https:" ? "wss" : "ws";
-    ws = new WebSocket(`${protocol}://${location.host}/ws`);
-
-    ws.onopen = () => {
-      console.log("voxer connected");
-      reconnectDelay = RECONNECT_BASE_MS;
-    };
-
-    ws.onclose = () => {
-      console.warn(`voxer disconnected, reconnecting in ${reconnectDelay}ms`);
-      setTimeout(connect, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-    };
-
-    ws.onerror = (err) => {
-      console.error("voxer error:", err);
-      ws.close();
-    };
-
-    ws.onmessage = (event) => {
-      queue.push(JSON.parse(event.data));
-      playNext();
-    };
-  }
-
-  connect();
+  VoxerOverlay.init({
+    onPlayStart: (event) => {
+      triggerVisuals();
+      spawnEmotes(event.emotes);
+    },
+    onPlayEnd: () => {
+      relaxVisuals();
+    },
+    onAudioElement: connectAudioReactivity,
+  });
 
   async function initVisuals() {
     try {

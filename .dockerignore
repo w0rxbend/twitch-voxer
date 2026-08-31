@@ -1,11 +1,31 @@
-.venv/
+# Never send secrets, local state, or build clutter to the Docker daemon.
 .git/
 .env
+.venv/
 data/
 audio/
 voices.json
-*.wav
-*.mp3
 __pycache__/
 *.py[oc]
 .python-version
+.ruff_cache/
+
+# Docs and repo metadata not needed inside the image
+README.md
+ARCHITECTURE.md
+logo.svg
+renovate.json
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Generated audio lives under data/ and audio/ — scope the patterns there so
+# the bundled emote sound files (emotes/*.mp3) still reach the build context.
+data/**/*.wav
+data/**/*.mp3
+audio/**/*.wav
+audio/**/*.mp3
+
+# emotes.db is generated locally by voxer/fetch_emotes.py (it is gitignored);
+# only the sound files and emote list are baked into the image.
+emotes/emotes.db

@@ -18,7 +18,7 @@ from .config import LOG_LEVEL
 def setup_logging() -> None:
     """Configure coloured logging with timestamp and module names.
 
-    Called once at startup in voxer/__init__.py before any other component
+    Called once at startup by voxer/app.py::run() before any other component
     initialises so all subsequent log output is consistently formatted.
     """
     level = getattr(logging, LOG_LEVEL, logging.INFO)
