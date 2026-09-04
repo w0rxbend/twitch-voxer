@@ -164,10 +164,38 @@ class AnnounceTracker:
         separate check and update under it) makes the check-then-update atomic
         by construction, so two concurrent messages from the same user cannot
         both claim the prefix.
+
+        A stored value that cannot be read as a number (a hand-edited file, a
+        half-written save) is reported and treated as "never seen", which
+        announces the user and — because the write below happens either way —
+        replaces the unreadable value with a good one.  Raising instead would
+        be worse than useless: the write would never be reached, so the entry
+        could never repair itself and every later message from that user would
+        fail the same way, leaving them permanently un-announced.
         """
         async with self._lock:
+            # One timestamp for the whole operation.  The comparison and the
+            # value written down are the same instant conceptually, so reading
+            # the clock twice can only introduce a small disagreement between
+            # them for no benefit.
+            now = time.time()
             last = await self._db.get(username)
-            announce = not last or (time.time() - float(last)) > self._window_secs
-            await self._db.set(username, str(time.time()))
+            announce = True
+            if last:
+                try:
+                    announce = (now - float(last)) > self._window_secs
+                except TypeError, ValueError:
+                    LOGGER.warning(
+                        "Unreadable last-seen value %r for %s — treating as new",
+                        last,
+                        username,
+                    )
+            # The timestamp goes to disk as a string rather than a number
+            # because that is the shape every existing timestamps.json already
+            # holds.  Writing numbers instead would not let the float() call
+            # above go away — files written by older versions still contain
+            # strings — so it would only widen what the reader must accept,
+            # forever, in exchange for nothing.
+            await self._db.set(username, str(now))
             await self._db.save()
         return announce

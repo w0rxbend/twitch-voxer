@@ -139,6 +139,50 @@ class TestAnnounceTracker:
         assert await tracker.claim("alice") is True
         assert await tracker.claim("bob") is True
 
+    # A timestamps file can hold something that is not a number: it is plain
+    # JSON that a human can edit, and a save interrupted part-way through can
+    # leave a half-written value behind.  A string that is not a number raises
+    # ValueError when read as a float; a value of the wrong shape entirely
+    # raises TypeError.  Both must be survivable.
+    @pytest.mark.parametrize(
+        "junk",
+        ["not-a-float", {"written": "by an older version"}],
+        ids=["unparsable-string", "wrong-type"],
+    )
+    async def test_unreadable_timestamp_self_heals(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        junk: object,
+    ) -> None:
+        """A junk stored value must announce the user, warn, and repair itself.
+
+        The repair is the point.  The bad value is only overwritten if claim()
+        gets as far as the write, so the second claim returning False proves
+        that the first one wrote a good timestamp rather than failing before
+        it.  Were the failure left to propagate, the entry would stay broken
+        and every future message from that user would raise again — which the
+        handler catches and logs, so the user would go silently un-announced
+        forever with nothing but a repeating traceback to explain it.
+        """
+        path = str(tmp_path / "ts.json")
+        seed = pickledb.PickleDB(path)
+        # Inside an async test pickledb's dual sync/async methods return
+        # awaitables, so these must be awaited or nothing reaches the file
+        await seed.set("alice", junk)
+        await seed.save()
+
+        tracker = AnnounceTracker(path, window_secs=300)
+        await tracker.load()
+
+        with caplog.at_level("WARNING"):
+            assert await tracker.claim("alice") is True
+        assert "alice" in caplog.text
+
+        # Well inside the 300 s window: a False here can only mean the first
+        # claim replaced the junk with a timestamp it can now read back
+        assert await tracker.claim("alice") is False
+
 
 class TestEmoteStore:
     async def test_load_reads_every_seeded_emote(self, emote_db_path: str) -> None:
