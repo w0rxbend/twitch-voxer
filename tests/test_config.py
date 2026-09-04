@@ -23,7 +23,7 @@ import os
 import pytest
 
 from voxer import config
-from voxer.config import _env_csv, _env_int
+from voxer.config import _env_csv, _env_int, _env_name_in_use
 
 
 class TestEnvInt:
@@ -89,12 +89,49 @@ class TestEnvInt:
     def test_a_bad_default_is_reported_the_same_way(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The deprecated VOXER_SCHEDULER_INTERVAL alias is passed in as the
-        *default*, so a bad value there must be caught too rather than sliding
-        past the parse and reaching int() unchecked."""
+        """A default that is not a number is caught rather than reaching int()
+        unchecked.  Every default in this module is a literal today, so this
+        guards against a future one being built from something looser."""
         monkeypatch.delenv("VOXER_TEST_INT", raising=False)
         with pytest.raises(RuntimeError, match="must be a whole number"):
             _env_int("VOXER_TEST_INT", "ten minutes")
+
+
+class TestEnvNameInUse:
+    """Choosing which of a setting's two accepted names to report problems under."""
+
+    def test_the_deprecated_name_is_used_when_it_is_the_one_that_is_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Somebody upgrading has only the old name in their .env file.
+
+        If a bad value there were reported under the new name, they would go
+        looking for a variable that is not in their file at all -- the exact
+        confusion the named-variable error message exists to prevent.
+        """
+        monkeypatch.delenv("VOXER_NEW_NAME", raising=False)
+        monkeypatch.setenv("VOXER_OLD_NAME", "10m")
+        assert _env_name_in_use("VOXER_NEW_NAME", "VOXER_OLD_NAME") == "VOXER_OLD_NAME"
+        with pytest.raises(RuntimeError, match="VOXER_OLD_NAME must be a whole number"):
+            _env_int(_env_name_in_use("VOXER_NEW_NAME", "VOXER_OLD_NAME"), "600")
+
+    def test_the_current_name_wins_when_both_are_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VOXER_NEW_NAME", "30")
+        monkeypatch.setenv("VOXER_OLD_NAME", "60")
+        assert _env_name_in_use("VOXER_NEW_NAME", "VOXER_OLD_NAME") == "VOXER_NEW_NAME"
+        assert (
+            _env_int(_env_name_in_use("VOXER_NEW_NAME", "VOXER_OLD_NAME"), "600") == 30
+        )
+
+    def test_the_current_name_is_reported_when_neither_is_set(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A fresh install should be told about the name it ought to be using."""
+        monkeypatch.delenv("VOXER_NEW_NAME", raising=False)
+        monkeypatch.delenv("VOXER_OLD_NAME", raising=False)
+        assert _env_name_in_use("VOXER_NEW_NAME", "VOXER_OLD_NAME") == "VOXER_NEW_NAME"
 
 
 class TestEnvCsv:

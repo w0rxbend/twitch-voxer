@@ -40,6 +40,7 @@ from .config import (
     AUDIO_MAX_AGE_SECS,
     AUDIO_SWEEP_INTERVAL_SECS,
     BOT_USERNAME,
+    ConfigError,
     DB_PATH,
     EMOTE_SOUND_PATHS,
     EMOTES_DB_PATH,
@@ -334,10 +335,18 @@ def main() -> None:
         # handler turns it into this exception.  Nothing is wrong, so there is
         # nothing to show a stack trace for.
         LOGGER.info("Shutting down")
-    except RuntimeError as exc:
+    except ConfigError as exc:
         # validate_config() reports an unusable configuration by raising
-        # RuntimeError with a message naming the environment variable at fault.
+        # ConfigError with a message naming the environment variable at fault.
         # That is something for the operator to fix in their .env file, not a
         # bug to debug, so print the sentence and exit non-zero (SystemExit
         # with a string prints it to stderr and sets the exit status to 1).
+        #
+        # Only ConfigError, not RuntimeError: run() goes on to download a
+        # ~100 MB speech model and open a socket, and either can raise a plain
+        # RuntimeError of its own.  Catching the base class relabelled those as
+        # "Configuration error" and discarded the traceback, which sent whoever
+        # hit them looking through their .env file for a fault that was not
+        # there.  Anything that is not a configuration problem now crashes with
+        # its stack trace intact, which is what a bug report needs.
         raise SystemExit(f"Configuration error: {exc}") from exc

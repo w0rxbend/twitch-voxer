@@ -24,6 +24,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+class ConfigError(RuntimeError):
+    """A setting is missing, unparseable, or outside the range that can work.
+
+    Everything raised by this module uses this type so that the entry point
+    (voxer.app.main) can tell "the operator needs to edit their .env file"
+    apart from every other RuntimeError the program might raise -- a failed
+    speech-model download, for instance, which used to be reported as a
+    configuration error and had its traceback thrown away.
+
+    It subclasses RuntimeError rather than Exception so that any existing
+    caller written to catch RuntimeError keeps working unchanged.
+    """
+
+
 # ── Parse helpers ─────────────────────────────────────────────────────────────
 # Defined above the constants because every numeric and list setting below is
 # built by calling one of them while this module is being imported.
@@ -42,8 +56,8 @@ def _env_int(
     reports a typo as `ValueError: invalid literal for int() with base 10:
     'eighty'`, raised from an `import` statement.  That message names neither
     the setting nor the file it came from, so whoever mistyped it in .env has
-    to work out which of the six numeric settings is at fault.  Here the
-    RuntimeError names the variable and echoes the value.
+    to work out which numeric setting is at fault.  Here the ConfigError names
+    the variable and echoes the value.
 
     `minimum` (and, for ports, `maximum`) reject numbers that parse fine but
     cannot work.  The default minimum of 1 suits every setting here except the
@@ -57,12 +71,33 @@ def _env_int(
     try:
         value = int(raw)
     except ValueError:
-        raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
+        raise ConfigError(f"{name} must be a whole number, got {raw!r}") from None
     if value < minimum:
-        raise RuntimeError(f"{name} must be at least {minimum}, got {value}")
+        raise ConfigError(f"{name} must be at least {minimum}, got {value}")
     if maximum is not None and value > maximum:
-        raise RuntimeError(f"{name} must be at most {maximum}, got {value}")
+        raise ConfigError(f"{name} must be at most {maximum}, got {value}")
     return value
+
+
+def _env_name_in_use(preferred: str, deprecated: str) -> str:
+    """Return whichever of two names for the same setting the operator has set.
+
+    A setting that has been renamed is readable under both names for a while,
+    and everything downstream -- most importantly the error message _env_int
+    produces for a bad value -- should talk about the name that is actually in
+    the operator's .env file.  Naming the other one sends them looking for a
+    variable they have never heard of.
+
+    The preferred name wins when both are set, and is also what is returned
+    when neither is, so a fresh install is told about the current name.
+
+    Args:
+        preferred: The current name for the setting.
+        deprecated: The older name, still accepted.
+    """
+    if os.getenv(preferred) is None and os.getenv(deprecated) is not None:
+        return deprecated
+    return preferred
 
 
 def _env_csv(name: str, default: str) -> list[str]:
@@ -178,9 +213,15 @@ SCHEDULER_INITIAL_DELAY: int = _env_int(
 # The normal posting cadence is NOT this value — it is derived from each
 # message's frequency_per_hour in data/messages.json.
 # VOXER_SCHEDULER_INTERVAL is accepted as a deprecated alias of the new name.
+# Which of the two names is in use is worked out first, so that a bad value is
+# reported under the variable the operator actually set.  Resolving the alias
+# into _env_int's `default` argument instead would have told someone upgrading
+# from an older release that VOXER_SCHEDULER_EMPTY_RETRY_DELAY was at fault --
+# a variable they have never heard of and cannot find in their .env file --
+# which is the exact confusion _env_int exists to prevent.
 SCHEDULER_EMPTY_RETRY_DELAY: int = _env_int(
-    "VOXER_SCHEDULER_EMPTY_RETRY_DELAY",
-    os.getenv("VOXER_SCHEDULER_INTERVAL", "600"),
+    _env_name_in_use("VOXER_SCHEDULER_EMPTY_RETRY_DELAY", "VOXER_SCHEDULER_INTERVAL"),
+    "600",
 )
 
 # ── Message queue ─────────────────────────────────────────────────────────────
@@ -255,12 +296,12 @@ def validate_redirect_url(url: str) -> None:
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise RuntimeError(
+        raise ConfigError(
             f"VOXER_OAUTH_REDIRECT_URL must be a full http(s) URL, got: {url!r}"
         )
     is_localhost = parsed.hostname in ("localhost", "127.0.0.1")
     if not is_localhost and parsed.scheme != "https":
-        raise RuntimeError(
+        raise ConfigError(
             "VOXER_OAUTH_REDIRECT_URL must use https:// for a non-localhost "
             f"host (Twitch requires it, and the authorization flow builds an "
             f"https redirect URI for public domains), got: {url!r}"
@@ -289,13 +330,13 @@ def validate_credentials() -> None:
     """
     missing = [name for name, value in _REQUIRED_CREDENTIALS if not value]
     if missing:
-        raise RuntimeError(
+        raise ConfigError(
             "Required environment variables are not set: " + ", ".join(missing)
         )
 
 
 def validate_config() -> None:
-    """Check the whole configuration, raising RuntimeError on the first problem.
+    """Check the whole configuration, raising ConfigError on the first problem.
 
     Three rules are applied, in order:
       1. the Twitch application credentials are present (validate_credentials);
@@ -306,7 +347,7 @@ def validate_config() -> None:
     """
     validate_credentials()
     if not BOT_USERNAME:
-        raise RuntimeError(
+        raise ConfigError(
             "TWITCH_BOT_USERNAME is not set: it must be the Twitch login name "
             "of the account this bot signs in as. There is no default, because "
             "a wrong one is silent — the login is resolved to a numeric Twitch "
