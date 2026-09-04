@@ -8,15 +8,21 @@ restarting the bot.
 import asyncio
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Final
 
 import pickledb
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 SECONDS_PER_HOUR = 3600.0
 DEFAULT_FREQUENCY_PER_HOUR = 1.0
+# How much of a message's text the "posting" log line shows.  A scheduled
+# message can be a long paragraph, and the log line exists to identify which
+# message went out, not to reproduce it, so it is truncated to keep one cycle
+# on one line.
+LOG_TEXT_PREVIEW_CHARS: Final[int] = 60
 
 
 @dataclass(frozen=True)
@@ -53,7 +59,11 @@ class Scheduler:
         self._db = pickledb.PickleDB(str(messages_path))
         self._empty_retry_delay = empty_retry_delay
         self._initial_delay = initial_delay
-        self._sent_count = 0
+        # Counts attempts, not successes: it is incremented before the send and
+        # never rolled back when the send fails, so a run in which every post
+        # errors still logs attempt 1, 2, 3…  The name says so to stop anyone
+        # reading the log as proof that messages reached chat.
+        self._post_attempts = 0
 
     def _parse_message(self, raw: Any, index: int) -> ScheduledMessage | None:
         if isinstance(raw, str):
@@ -135,6 +145,47 @@ class Scheduler:
             return float(self._empty_retry_delay)
         return SECONDS_PER_HOUR / total_frequency_per_hour
 
+    async def _run_once(self) -> float:
+        """Run exactly one scheduling cycle and report how long to wait after it.
+
+        One cycle is: re-read the message list from disk, and — if the list has
+        anything usable in it — pick one message by weight and try to post it.
+        At most one message is posted per cycle.
+
+        This is a separate method from run() so that it can be tested. run() is
+        an endless loop around asyncio.sleep, which a test cannot enter without
+        either waiting for real time to pass or patching the clock; one cycle
+        is an ordinary coroutine that hands the waiting back to its caller.
+
+        Returns:
+            Seconds the caller should wait before running the next cycle: the
+            cadence derived from the messages that were just read, or the
+            fallback retry delay when there was nothing to post.
+        """
+        messages = await self._load_messages()
+        if not messages:
+            return float(self._empty_retry_delay)
+
+        message = self._choose_message(messages)
+        self._post_attempts += 1
+        delay = self._delay_for(messages)
+        LOGGER.info(
+            "Posting scheduled message (attempt %d, %.2f/hour, next in %.0fs): %r",
+            self._post_attempts,
+            message.frequency_per_hour,
+            delay,
+            message.text[:LOG_TEXT_PREVIEW_CHARS],
+        )
+        try:
+            await self._send_chat(message.text)
+        except Exception:
+            # A transient Twitch API failure (network blip, token refresh,
+            # 500) must not kill the scheduler — and, via the TaskGroup
+            # cancelling its siblings, the whole application.
+            # Log and try again next cycle.
+            LOGGER.exception("Failed to post scheduled message")
+        return delay
+
     async def run(self) -> None:
         """Continuously post random scheduled messages to chat.
 
@@ -150,26 +201,4 @@ class Scheduler:
         )
         await asyncio.sleep(self._initial_delay)
         while True:
-            messages = await self._load_messages()
-            if messages:
-                message = self._choose_message(messages)
-                self._sent_count += 1
-                delay = self._delay_for(messages)
-                LOGGER.info(
-                    "Posting scheduled message %d (%.2f/hour, next in %.0fs): %r",
-                    self._sent_count,
-                    message.frequency_per_hour,
-                    delay,
-                    message.text[:60],
-                )
-                try:
-                    await self._send_chat(message.text)
-                except Exception:
-                    # A transient Twitch API failure (network blip, token refresh,
-                    # 500) must not kill the scheduler — and, via the TaskGroup
-                    # cancelling its siblings, the whole application.
-                    # Log and try again next cycle.
-                    LOGGER.exception("Failed to post scheduled message")
-            else:
-                delay = float(self._empty_retry_delay)
-            await asyncio.sleep(delay)
+            await asyncio.sleep(await self._run_once())
