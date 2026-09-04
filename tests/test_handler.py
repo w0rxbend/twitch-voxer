@@ -12,6 +12,8 @@ the pipeline have to be faked or the tests would be slow and flaky:
     different announcement template and make assertions flap.
 """
 
+import os
+import time
 from pathlib import Path
 
 import pickledb
@@ -236,6 +238,30 @@ class TestEmoteOnlyMessages:
         played = audio_dir / Path(broadcasts[0].audio_url).name
         assert played.exists()
 
+    async def test_emote_only_clip_is_stamped_now_not_with_the_source_time(
+        self, build_handler, broadcasts, tmp_path, audio_dir
+    ) -> None:
+        """The copied clip must carry its own age, not the source sound's.
+
+        The notification sounds ship with the project, so their modification
+        time is whenever the repository was checked out — long in the past.
+        server.reap_audio decides which clips have been abandoned by reading
+        that same timestamp, so a clip that inherited the source's time would
+        be older than the reaper's threshold from the moment it existed and
+        would be deleted on the next sweep, possibly mid-playback.
+        """
+        sound = tmp_path / "ping.mp3"
+        sound.write_bytes(b"fake-mp3")
+        # Backdate the source by a day, the way a checked-out asset looks.
+        old = time.time() - 86_400
+        os.utime(sound, (old, old))
+        instance = await build_handler(emote_sound_paths=[str(sound)])
+
+        await instance.handle(QueuedMessage(username="alice", text="🎉"))
+
+        played = audio_dir / Path(broadcasts[0].audio_url).name
+        assert time.time() - played.stat().st_mtime < 60
+
     async def test_emote_only_is_skipped_without_configured_sounds(
         self, build_handler, broadcasts
     ) -> None:
@@ -441,10 +467,11 @@ class TestBroadcastFailureLeavesNoOrphans:
     ) -> None:
         """A copy that dies part-way leaves no truncated MP3 behind.
 
-        shutil.copy2 writes the destination incrementally, so a full disk or a
-        cancelled task can leave a file that exists but is unplayable.  The real
-        copy cannot be made to fail on demand, so it is replaced with one that
-        writes a few bytes and then raises, which is the same state on disk.
+        shutil.copyfile writes the destination incrementally, so a full disk
+        or a cancelled task can leave a file that exists but is unplayable.  The
+        real copy cannot be made to fail on demand, so it is replaced with one
+        that writes a few bytes and then raises, which is the same state on
+        disk.
         """
         sound = tmp_path / "ping.mp3"
         sound.write_bytes(b"fake-mp3")
@@ -453,7 +480,7 @@ class TestBroadcastFailureLeavesNoOrphans:
             Path(dst).write_bytes(b"trunc")
             raise OSError("No space left on device")
 
-        monkeypatch.setattr(handler_module.shutil, "copy2", half_write)
+        monkeypatch.setattr(handler_module.shutil, "copyfile", half_write)
         instance = await build_handler(emote_sound_paths=[str(sound)])
 
         with pytest.raises(OSError):

@@ -306,12 +306,23 @@ class MessageHandler:
         mp3_path = self._new_mp3_path()
         # Copy rather than move so the source sound file is preserved for reuse.
         # Runs in a thread — file I/O would otherwise block the event loop.
+        #
+        # copyfile, not copy2: copy2 additionally copies the source's metadata,
+        # including its modification time.  The notification sounds ship with
+        # the project, so their modification time is whenever the repository was
+        # checked out or the Docker image was built — days or months ago.  A
+        # clip stamped with that time is born older than AUDIO_MAX_AGE_SECS, and
+        # server.reap_audio, which decides what is abandoned by looking at
+        # exactly that timestamp, would delete it on its next pass, quite
+        # possibly while the browser was still playing it.  copyfile leaves the
+        # new file stamped "now", which is what the clip's age actually is.
         try:
-            await asyncio.to_thread(shutil.copy2, sound, mp3_path)
+            await asyncio.to_thread(shutil.copyfile, sound, mp3_path)
         except BaseException:
-            # copy2 can fail part-way (a full disk, a cancelled task) and leave a
-            # truncated file behind, exactly as a failed ffmpeg run can — clear
-            # it up the same way rather than leaving an unplayable orphan.
+            # The copy can fail part-way (a full disk, a cancelled task) and
+            # leave a truncated file behind, exactly as a failed ffmpeg run can
+            # — clear it up the same way rather than leaving an unplayable
+            # orphan.
             mp3_path.unlink(missing_ok=True)
             raise
         await self._publish(
