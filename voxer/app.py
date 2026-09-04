@@ -55,6 +55,29 @@ from .tts import TTSService
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
+def _prepare_runtime_dirs(audio_dir: Path, token_file: Path) -> None:
+    """Create the directories the bot writes into, before anything writes there.
+
+    Two directories have to exist before startup can continue: the one MP3s are
+    written to, and the one holding the OAuth token file that twitchio saves the
+    first grant into.  Both are configurable (``VOXER_AUDIO_DIR`` and
+    ``VOXER_TOKEN_FILE``), and a Docker deployment can point either at a path
+    several levels deep on an empty volume.
+
+    ``parents=True`` means "create any missing parent directories too", so a
+    value like ``/data/voxer/audio`` works even when ``/data`` is empty; without
+    it, Python raises ``FileNotFoundError``.  ``exist_ok=True`` means an already
+    existing directory is not an error, which is the normal case on every run
+    after the first.
+
+    This lives in its own function rather than inline in :func:`run` so it can be
+    tested: ``run()`` opens a Twitch WebSocket and downloads a ~100 MB speech
+    model, so nothing inside it can be exercised directly.
+    """
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+
+
 async def run() -> None:
     """Initialize and start the Twitch TTS bot with all components.
 
@@ -68,13 +91,11 @@ async def run() -> None:
     # component (which would fail later with a less helpful error) starts.
     validate_config()
 
-    # Ensure the audio output directory exists before any MP3 is written there
+    # Both the audio output dir and the token file's dir must exist before
+    # anything writes into them — see _prepare_runtime_dirs for why.
     audio_dir = Path(AUDIO_DIR)
-    audio_dir.mkdir(exist_ok=True)
+    _prepare_runtime_dirs(audio_dir, Path(TOKEN_FILE))
     LOGGER.info("Audio dir: %s", audio_dir.resolve())
-
-    # The token file's directory must exist before twitchio saves the first grant
-    Path(TOKEN_FILE).parent.mkdir(parents=True, exist_ok=True)
 
     # MP3s are normally deleted when the overlay reports playback done, but
     # files leak when no client is connected or the process is restarted
