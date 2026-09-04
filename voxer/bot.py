@@ -23,16 +23,25 @@ are persisted to config.TOKEN_FILE and auto-refreshed by twitchio.
 import asyncio
 import logging
 import webbrowser
+from collections.abc import Iterable
+from typing import Final
 
 import twitchio
-from twitchio import ChatMessage, Client, Scopes, eventsub, MultiSubscribePayload
+from twitchio import (
+    ChatMessage,
+    ChatMessageFragment,
+    Client,
+    Scopes,
+    eventsub,
+    MultiSubscribeError,
+    MultiSubscribePayload,
+)
 from twitchio.authentication import UserTokenPayload, ValidateTokenPayload
-from twitchio.user import Chatter
+from twitchio.user import Chatter, PartialUser
 from twitchio.ext import commands
 from twitchio.web import AiohttpAdapter
 
 from . import config
-from .config import CLIENT_ID, CLIENT_SECRET
 from .events import (
     cheer_message,
     follow_message,
@@ -67,6 +76,118 @@ OAUTH_SCOPES: Scopes = Scopes(
     ]
 )
 
+# Twitch can omit the login name in rare event payloads (deleted accounts, and
+# gifts/cheers the sender chose to hide).  Every announcement still needs some
+# name to speak and to show on the overlay, so these two stand in: "unknown"
+# where a name was expected but missing, "anonymous" where Twitch deliberately
+# withheld it.
+_UNKNOWN_USER: Final[str] = "unknown"
+_ANONYMOUS_USER: Final[str] = "anonymous"
+
+# HTTP 409 Conflict is what Twitch answers when the conduit subscription being
+# requested is already active.  We re-subscribe on every boot (see
+# subscribe_for), so this is the expected reply, not an error.
+_SUBSCRIPTION_ALREADY_EXISTS: Final[int] = 409
+
+
+def split_fragments(
+    fragments: Iterable[ChatMessageFragment],
+) -> tuple[str, list[str]]:
+    """Split a chat message's fragments into speakable text and emote names.
+
+    Twitch does not deliver a chat message as one string.  It delivers a list of
+    typed fragments: ``text`` for ordinary words, ``emote`` for a channel or
+    global emote, plus ``cheermote`` and ``mention`` kinds we do not use here.
+
+    Only ``text`` fragments are worth speaking — reading "Kappa Kappa Kappa"
+    aloud is noise — so they are joined with single spaces and stripped.  The
+    ``emote`` fragments carry the emote's name in their ``text`` field, and are
+    collected separately so the overlay can look up and display their images.
+
+    Args:
+        fragments: The fragment list from a chat-message event payload.
+
+    Returns:
+        A ``(text, emote_names)`` pair.  Either half can be empty: an emote-only
+        message has no text, and a plain sentence has no emotes.
+    """
+    text_parts: list[str] = []
+    emote_names: list[str] = []
+    for fragment in fragments:
+        if fragment.type == "text":
+            text_parts.append(fragment.text)
+        elif fragment.type == "emote":
+            emote_names.append(fragment.text)
+    return " ".join(text_parts).strip(), emote_names
+
+
+def classify_subscribe_errors(
+    errors: Iterable[MultiSubscribeError],
+) -> tuple[list[MultiSubscribeError], list[MultiSubscribeError]]:
+    """Separate "already subscribed" replies from genuine subscription failures.
+
+    ``multi_subscribe`` reports every subscription it could not create as an
+    error, but one of those "errors" is routine: asking for a subscription that
+    is already active answers HTTP 409 Conflict, which happens on every restart
+    because we re-register the bot's own channel each boot.  Treating 409 like a
+    real failure would print a warning on every single start and train the
+    operator to ignore the one message that matters.
+
+    Args:
+        errors: The ``errors`` list from a ``MultiSubscribePayload``.
+
+    Returns:
+        A ``(duplicates, failures)`` pair, each preserving the input order:
+        duplicates are the 409s (log at debug), failures are everything else
+        (log at warning).
+    """
+    duplicates: list[MultiSubscribeError] = []
+    failures: list[MultiSubscribeError] = []
+    for error in errors:
+        if error.error.status == _SUBSCRIPTION_ALREADY_EXISTS:
+            duplicates.append(error)
+        else:
+            failures.append(error)
+    return duplicates, failures
+
+
+def oauth_start_url(redirect_url: str, oauth_port: int) -> str:
+    """Build the URL a human opens to start the one-time OAuth authorization.
+
+    This is not the redirect URL Twitch calls back on — it is the ``/oauth``
+    route twitchio's own web adapter serves, which bounces the browser to
+    Twitch's consent screen.
+
+    Which host to use is decided by the *redirect* URL, because both have to be
+    served by the same adapter.  When that URL names a public domain (anything
+    other than localhost), twitchio's adapter serves the route under that domain
+    over HTTPS, so the link must use it too.  When it does not, the adapter
+    serves on its own bind host and port, and ``localhost`` is the address that
+    works both on the host machine and through a published Docker port.
+
+    Args:
+        redirect_url: The value of ``VOXER_OAUTH_REDIRECT_URL``.
+        oauth_port: The port the adapter binds, used only in the localhost case.
+
+    Returns:
+        An absolute URL ending in ``/oauth``.
+    """
+    domain, _ = config.parse_redirect_url(redirect_url)
+    if domain:
+        return f"https://{domain}/oauth"
+    return f"http://localhost:{oauth_port}/oauth"
+
+
+def _display_name(user: PartialUser) -> str:
+    """Return a user's login name, or a placeholder when Twitch omitted it.
+
+    twitchio types ``name`` as ``str | None`` because Twitch can send an event
+    for an account whose login is no longer resolvable.  Every caller here needs
+    a real string (it is spoken aloud and rendered on the overlay), so the one
+    fallback lives in this one place.
+    """
+    return user.name or _UNKNOWN_USER
+
 
 async def get_user_id(username: str) -> str:
     """Fetch Twitch user ID by login name.
@@ -83,7 +204,9 @@ async def get_user_id(username: str) -> str:
     Raises:
         ValueError: If user not found.
     """
-    async with Client(client_id=CLIENT_ID, client_secret=CLIENT_SECRET) as client:
+    async with Client(
+        client_id=config.CLIENT_ID, client_secret=config.CLIENT_SECRET
+    ) as client:
         # load_tokens/save_tokens off: this throwaway client only needs an app
         # token, and the defaults would read AND rewrite ".tio.tokens.json" in
         # the working directory — a file this project never uses.
@@ -105,14 +228,12 @@ class VoxBot(commands.AutoBot):
         self,
         *,
         bot_id: str,
-        subs: list[eventsub.SubscriptionPayload],
         message_queue: asyncio.Queue["QueuedMessage"],
     ) -> None:
-        """Initialize the Twitch bot with EventSub subscriptions and message queue.
+        """Initialize the Twitch bot with its message queue.
 
         Args:
             bot_id: Twitch user ID of the bot account.
-            subs: List of EventSub subscriptions to register at connection time.
             message_queue: Queue for dispatching chat messages to the handler.
         """
         self._message_queue = message_queue
@@ -123,12 +244,15 @@ class VoxBot(commands.AutoBot):
         # components start.
         self.bot_authorized: asyncio.Event = asyncio.Event()
         super().__init__(
-            client_id=CLIENT_ID,
-            client_secret=CLIENT_SECRET,
+            client_id=config.CLIENT_ID,
+            client_secret=config.CLIENT_SECRET,
             bot_id=bot_id,
             owner_id=bot_id,
             prefix="!",  # command prefix (no chat commands are defined yet)
-            subscriptions=subs,
+            # No constructor-time subscriptions.  Every subscription this bot
+            # needs is per-broadcaster and requires a user token, so they are
+            # all registered later by subscribe_for().
+            subscriptions=[],
             # Default scope set used by the /oauth route when no ?scopes= is given
             scopes=OAUTH_SCOPES,
             # Built-in web server providing the /oauth and redirect routes.
@@ -168,7 +292,7 @@ class VoxBot(commands.AutoBot):
         """Persist all user tokens to the configured token file."""
         await super().save_tokens(path or config.TOKEN_FILE)
 
-    async def event_token_refreshed(self, payload: object) -> None:
+    async def event_token_refreshed(self, _payload: object) -> None:
         """Persist tokens every time twitchio rotates a refresh token.
 
         Twitch rotates the refresh token on every refresh (~hourly).  Saving
@@ -227,15 +351,9 @@ class VoxBot(commands.AutoBot):
                     self.bot_id,
                 )
 
-        # The /oauth route always runs on the adapter.  With a public domain
-        # in the redirect URL, the /oauth link uses it (HTTPS, per twitchio's
-        # adapter); otherwise localhost works both on the host and through
-        # Docker's published port.
-        domain, _ = config.parse_redirect_url(config.OAUTH_REDIRECT_URL)
-        if domain:
-            url = f"https://{domain}/oauth"
-        else:
-            url = f"http://localhost:{config.OAUTH_PORT}/oauth"
+        # The /oauth route always runs on the adapter; see oauth_start_url for
+        # why the public domain wins over localhost when one is configured.
+        url = oauth_start_url(config.OAUTH_REDIRECT_URL, config.OAUTH_PORT)
         LOGGER.info("No stored Twitch token — starting one-time browser authorization")
         LOGGER.info("Authorize the bot here: %s", url)
         LOGGER.info(
@@ -244,7 +362,13 @@ class VoxBot(commands.AutoBot):
         )
         try:
             opened = await asyncio.to_thread(webbrowser.open, url)
-        except Exception:
+        except Exception as exc:
+            # A headless machine (a Docker container, a server over SSH) has no
+            # browser to open, which is normal here — the URL is logged just
+            # above so it can be opened by hand.  Recording the reason at debug
+            # keeps the normal path quiet while still answering "why did nothing
+            # open?" for anyone who does expect a browser.
+            LOGGER.debug("webbrowser.open failed: %s", exc)
             opened = False
         if not opened:
             LOGGER.info(
@@ -285,22 +409,13 @@ class VoxBot(commands.AutoBot):
     async def event_message(self, payload: ChatMessage) -> None:
         """Handle incoming Twitch chat message by enqueuing it for TTS processing.
 
-        Twitch delivers each message as a list of typed fragments.
-        We split them into:
-          - text fragments  → joined into a single string for TTS
-          - emote fragments → collected as names for image overlay lookup
+        Twitch delivers each message as a list of typed fragments; see
+        split_fragments for how they become speakable text plus emote names.
 
         Args:
             payload: Chat message event from EventSub.
         """
-        # Join text fragments (skip emote/cheermote fragments — those are handled separately)
-        tts_text = " ".join(
-            fragment.text for fragment in payload.fragments if fragment.type == "text"
-        ).strip()
-        # Collect emote names so the overlay can display their images
-        emote_names = [
-            fragment.text for fragment in payload.fragments if fragment.type == "emote"
-        ]
+        tts_text, emote_names = split_fragments(payload.fragments)
         avatar_url = await self._get_avatar_url(payload.chatter)
         LOGGER.info(
             "Received message: %s — text=%r emotes=%r",
@@ -314,7 +429,7 @@ class VoxBot(commands.AutoBot):
         try:
             self._message_queue.put_nowait(
                 QueuedMessage(
-                    username=payload.chatter.name or "unknown",
+                    username=_display_name(payload.chatter),
                     text=tts_text,
                     emote_names=emote_names,
                     avatar_url=avatar_url,
@@ -411,10 +526,7 @@ class VoxBot(commands.AutoBot):
         ]
         LOGGER.info("Subscribing for user: %s", user_id)
         resp: MultiSubscribePayload = await self.multi_subscribe(subs)
-        # Twitch answers an already-active conduit subscription with 409
-        # Conflict — expected when re-subscribing on every boot, not a failure.
-        duplicates = [e for e in resp.errors if e.error.status == 409]
-        failures = [e for e in resp.errors if e.error.status != 409]
+        duplicates, failures = classify_subscribe_errors(resp.errors)
         if duplicates:
             LOGGER.debug(
                 "%d subscription(s) already active for user %s",
@@ -488,8 +600,7 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Follow event with the new follower's info.
         """
-        # Twitch can omit the login name in rare payloads; fall back to a placeholder
-        username = payload.user.name or "unknown"
+        username = _display_name(payload.user)
         LOGGER.info("New follow from %s", username)
         await self._enqueue_system(username, follow_message(username))
 
@@ -504,8 +615,7 @@ class VoxBot(commands.AutoBot):
         """
         if payload.gift:
             return  # gift subscriptions are handled by event_subscription_gift
-        # Twitch can omit the login name in rare payloads; fall back to a placeholder
-        username = payload.user.name or "unknown"
+        username = _display_name(payload.user)
         LOGGER.info("New subscription from %s (tier %s)", username, payload.tier)
         await self._enqueue_system(username, sub_message(username))
 
@@ -520,7 +630,7 @@ class VoxBot(commands.AutoBot):
             payload: Gift subscription event with gifter info and gift count.
         """
         username = payload.user.name if payload.user else None
-        display = username or "anonymous"
+        display = username or _ANONYMOUS_USER
         LOGGER.info("Gift sub from %s: %d subs", display, payload.total)
         await self._enqueue_system(display, gift_message(username, payload.total))
 
@@ -535,8 +645,7 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Resub event with subscriber info and cumulative month count.
         """
-        # Twitch can omit the login name in rare payloads; fall back to a placeholder
-        username = payload.user.name or "unknown"
+        username = _display_name(payload.user)
         LOGGER.info("Resub from %s (%d months)", username, payload.cumulative_months)
         await self._enqueue_system(
             username, resub_message(username, payload.cumulative_months)
@@ -551,7 +660,7 @@ class VoxBot(commands.AutoBot):
             payload: Cheer event with cheerer info and bit count.
         """
         username = payload.user.name if payload.user else None
-        display = username or "anonymous"
+        display = username or _ANONYMOUS_USER
         LOGGER.info("Cheer from %s: %d bits", display, payload.bits)
         await self._enqueue_system(display, cheer_message(username, payload.bits))
 
@@ -561,7 +670,7 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Raid event with raiding broadcaster info and viewer count.
         """
-        raider = payload.from_broadcaster.name or "unknown"
+        raider = _display_name(payload.from_broadcaster)
         viewers = payload.viewer_count
         LOGGER.info("Raid from %s with %d viewers", raider, viewers)
         await self._enqueue_system(raider, raid_message(raider, viewers))

@@ -149,10 +149,10 @@ async def run() -> None:
     bot_id = await get_user_id(BOT_USERNAME)
     LOGGER.info("Bot user ID: %s", bot_id)
 
-    # No constructor-time subscriptions: they are registered by subscribe_for()
-    # once a user token exists (first run via the OAuth callback, later runs
-    # right after ensure_authorized below).
-    async with VoxBot(bot_id=bot_id, subs=[], message_queue=message_queue) as bot:
+    # Subscriptions are not passed in here: they are registered by
+    # subscribe_for() once a user token exists (first run via the OAuth
+    # callback, later runs right after ensure_authorized below).
+    async with VoxBot(bot_id=bot_id, message_queue=message_queue) as bot:
         scheduler = Scheduler(
             send_chat=bot.send_chat,
             messages_path=Path(MESSAGES_PATH),

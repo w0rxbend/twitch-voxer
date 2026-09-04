@@ -104,7 +104,7 @@ sequenceDiagram
     app->>hdl: MessageHandler(tts, voice_store, announce_tracker, emote_store, broadcast, queue, ...)
     app->>hdl: await handler.preload_resources()  ← loads all three stores
     app->>bot: get_user_id(BOT_USERNAME)  ← one-shot Twitch API call, app token only
-    app->>bot: VoxBot(bot_id, subs=[], message_queue)  ← no subs yet
+    app->>bot: VoxBot(bot_id, message_queue)  ← no subs yet
     app->>sch: Scheduler(bot.send_chat, messages_path, delays)
     app->>app: TaskGroup: bot.start, server.serve, handler.process_queue
     Note over bot: bot.start() logs in, loads TOKEN_FILE,<br/>brings up the /oauth web adapter, serves EventSub
