@@ -11,7 +11,8 @@ Audio file lifecycle:
   2. AudioServer.broadcast() pushes {audio_url, username, avatar_url, emotes} over WebSocket.
   3. The browser plays the audio and fires an 'ended' event on the <audio> element.
   4. The browser sends {"done": "filename.mp3"} back over the WebSocket.
-  5. ws_endpoint unlinks the file from audio_dir (path-traversal check included).
+  5. _handle_ws passes that name to _delete_played_audio, which unlinks the
+     file from audio_dir (path-traversal check included).
 """
 
 import dataclasses
@@ -40,6 +41,22 @@ _STATIC_DIR = Path(__file__).parent / "static"
 # the whole client-to-server protocol; voxer/static/overlay.js points at this
 # constant, so the two halves of the protocol are findable from each other.
 DONE_FIELD: Final[str] = "done"
+
+
+def _overlay_page(name: str) -> FileResponse:
+    """Serve one of the overlay HTML pages out of voxer/static/.
+
+    The two pages differ only in which file they send, so the response they
+    share is built here.  `Cache-Control: no-store` is part of the contract
+    rather than an incidental header: OBS keeps its own HTTP cache, and a
+    cached page keeps running the JavaScript that was current when the browser
+    source was first added, so an updated overlay would never reach the stream
+    until someone recreated the source by hand.
+
+    Args:
+        name: File name inside voxer/static/, e.g. "index.html".
+    """
+    return FileResponse(_STATIC_DIR / name, headers={"Cache-Control": "no-store"})
 
 
 def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
@@ -75,83 +92,100 @@ class AudioServer:
         self._app = self._build_app()
 
     def _build_app(self) -> Starlette:
-        """Build and return the Starlette ASGI application with all routes wired up."""
+        """Build the Starlette ASGI application: the complete list of URLs served.
 
-        async def index(request: Request) -> FileResponse:
-            # Full-featured OBS overlay with 3D speaker animation and emote display
-            return FileResponse(
-                _STATIC_DIR / "index.html",
-                headers={
-                    "Cache-Control": "no-store"
-                },  # prevent OBS from caching stale JS
-            )
-
-        async def simple(request: Request) -> FileResponse:
-            # Lightweight alternative overlay without the 3D model
-            return FileResponse(
-                _STATIC_DIR / "simple.html",
-                headers={"Cache-Control": "no-store"},
-            )
-
-        async def favicon(request: Request) -> Response:
-            # Return an empty body so browsers don't log 404s for /favicon.ico
-            return Response(content=b"", media_type="image/x-icon")
-
-        async def ws_endpoint(websocket: WebSocket) -> None:
-            """Handle a single WebSocket client connection.
-
-            The protocol is one-directional from server to client (audio events),
-            with one client-to-server message type:
-              {"done": "filename.mp3"} — client finished playing, delete the file.
-            """
-            await websocket.accept()
-            self._clients.add(websocket)
-            LOGGER.info(
-                "WebSocket client connected — %d client(s) active", len(self._clients)
-            )
-            try:
-                while True:
-                    data = await websocket.receive_text()
-                    try:
-                        message = json.loads(data)
-                    except json.JSONDecodeError:
-                        LOGGER.warning("Received malformed WS message: %r", data)
-                        continue
-                    if not isinstance(message, dict):
-                        # Valid JSON but not an object (e.g. 42, null, [1]) —
-                        # calling .get() on it would crash this client's handler
-                        LOGGER.warning("Received non-object WS message: %r", data)
-                        continue
-                    if filename := message.get(DONE_FIELD):
-                        # Path-traversal guard: only allow deletion of files that are
-                        # direct children of audio_dir (no ../ or absolute paths).
-                        path = resolve_audio_file(self._audio_dir, filename)
-                        if path is not None:
-                            path.unlink(missing_ok=True)
-                            LOGGER.debug("Cleaned up audio file: %s", filename)
-                        else:
-                            LOGGER.warning("Rejected suspicious filename: %r", filename)
-            except WebSocketDisconnect:
-                LOGGER.info(
-                    "WebSocket client disconnected — %d client(s) remaining",
-                    len(self._clients) - 1,
-                )
-            finally:
-                # Always remove the socket from the active set on any disconnect or error
-                self._clients.discard(websocket)
-
+        This is the map of the server, so it holds nothing but the mapping.
+        Each route points at a method below, and bound methods work as
+        Starlette endpoints exactly as plain functions do.
+        """
         return Starlette(
             routes=[
-                Route("/", index),
-                Route("/simple", simple),
-                Route("/favicon.ico", favicon),
-                WebSocketRoute("/ws", ws_endpoint),
+                Route("/", self._handle_index),
+                Route("/simple", self._handle_simple),
+                Route("/favicon.ico", self._handle_favicon),
+                WebSocketRoute("/ws", self._handle_ws),
                 # Static files (JS, CSS, GLB model) served from voxer/static/
                 Mount("/static", StaticFiles(directory=_STATIC_DIR)),
                 # Ephemeral MP3 files served directly from audio_dir
                 Mount(AUDIO_URL_PREFIX, StaticFiles(directory=self._audio_dir)),
             ]
         )
+
+    async def _handle_index(self, request: Request) -> FileResponse:
+        """Serve the full OBS overlay: 3D speaker animation plus emote display."""
+        return _overlay_page("index.html")
+
+    async def _handle_simple(self, request: Request) -> FileResponse:
+        """Serve the lightweight overlay: the same events without the 3D model."""
+        return _overlay_page("simple.html")
+
+    async def _handle_favicon(self, request: Request) -> Response:
+        """Answer /favicon.ico with an empty body so browsers don't log a 404."""
+        return Response(content=b"", media_type="image/x-icon")
+
+    async def _handle_ws(self, websocket: WebSocket) -> None:
+        """Serve one WebSocket client for as long as its connection lasts.
+
+        The protocol is one-directional from server to client (audio events),
+        with one client-to-server message type:
+          {"done": "filename.mp3"} — client finished playing, delete the file.
+        """
+        await websocket.accept()
+        self._clients.add(websocket)
+        LOGGER.info(
+            "WebSocket client connected — %d client(s) active", len(self._clients)
+        )
+        try:
+            while True:
+                data = await websocket.receive_text()
+                try:
+                    message = json.loads(data)
+                except json.JSONDecodeError:
+                    LOGGER.warning("Received malformed WS message: %r", data)
+                    continue
+                if not isinstance(message, dict):
+                    # Valid JSON but not an object (e.g. 42, null, [1]) —
+                    # calling .get() on it would crash this client's handler
+                    LOGGER.warning("Received non-object WS message: %r", data)
+                    continue
+                if filename := message.get(DONE_FIELD):
+                    self._delete_played_audio(filename)
+        except WebSocketDisconnect:
+            # The ordinary way a connection ends: the browser closed the tab or
+            # OBS removed the source.  Nothing to report here — the count is
+            # logged in the finally block, so that every way out of this method
+            # (a disconnect, a cancellation at shutdown, an unexpected error)
+            # leaves the same trace instead of only this one.
+            pass
+        finally:
+            # Discard first, then log, so the number printed is the number of
+            # clients that are actually left.  The old message computed
+            # len(self._clients) - 1 before the removal — a prediction rather
+            # than a fact, and one that was wrong whenever two clients dropped
+            # at once.
+            self._clients.discard(websocket)
+            LOGGER.info(
+                "WebSocket client disconnected — %d client(s) remaining",
+                len(self._clients),
+            )
+
+    def _delete_played_audio(self, filename: str) -> None:
+        """Delete one finished MP3, refusing any name that escapes audio_dir.
+
+        The name comes from the browser, so it is untrusted input: a hostile or
+        merely buggy overlay could ask for "../../etc/passwd".  A name that does
+        not resolve to a direct child of audio_dir is logged and ignored, and
+        the connection carries on — a bad message is not a bad client.
+
+        Args:
+            filename: The value the browser sent under the "done" key.
+        """
+        path = resolve_audio_file(self._audio_dir, filename)
+        if path is None:
+            LOGGER.warning("Rejected suspicious filename: %r", filename)
+            return
+        path.unlink(missing_ok=True)
+        LOGGER.debug("Cleaned up audio file: %s", filename)
 
     async def broadcast(self, event: BroadcastEvent) -> None:
         """Send an audio event to all connected WebSocket clients.
@@ -179,7 +213,14 @@ class AudioServer:
             try:
                 await ws.send_text(message)
             except Exception:
-                # Client disconnected between messages; mark for removal
+                # Nearly always a client that vanished between messages, but it
+                # could equally be a bug on our side, and the warning below
+                # reports both as "stale client".  Recording the exception here
+                # makes the difference visible when someone turns on debug
+                # logging.  The clause stays deliberately broad: narrowing it
+                # would let an unexpected error escape the loop and skip every
+                # client that has not been sent to yet.
+                LOGGER.debug("Dropping client after send failure", exc_info=True)
                 dead.add(ws)
         if dead:
             LOGGER.warning("Dropped %d stale client(s)", len(dead))

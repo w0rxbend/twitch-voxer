@@ -234,7 +234,7 @@ graph LR
         R1[GET /] --> IDX[index.html\nOBS overlay]
         R2[GET /simple] --> SIMP[simple.html\nalternate overlay]
         R3[GET /favicon.ico] --> FAV[empty response]
-        R4[WS /ws] --> WSH[ws_endpoint\nclient set management\n+ audio file cleanup]
+        R4[WS /ws] --> WSH[_handle_ws\nclient set management\n+ audio file cleanup]
         R5[GET /static/**] --> STDIR[voxer/static/]
         R6[GET /audio/**] --> ADIR[audio/ dir\nephemeral MP3s]
     end
