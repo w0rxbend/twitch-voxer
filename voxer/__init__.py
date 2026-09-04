@@ -1,7 +1,8 @@
 """twitch-voxer — Twitch chat TTS bot with per-user voices and a browser overlay.
 
 The package is organised as:
-  app.py       — composition root (wires everything together; the entry point)
+  app.py       — composition root (wires everything together, owns shutdown
+                 signals; the entry point)
   bot.py       — Twitch adapter (twitchio AutoBot, EventSub, OAuth flow)
   handler.py   — message-to-audio pipeline orchestration
   textnorm.py  — pure text rules (bot filter, emoji, normalisation)

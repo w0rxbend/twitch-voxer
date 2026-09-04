@@ -13,6 +13,12 @@ Startup order matters:
      added only after ensure_authorized() so it never posts to chat without a
      user token (which would 401 on every attempt).
 
+Shutdown:
+  This module owns SIGINT (Ctrl-C) and SIGTERM (`docker stop`) while the
+  components are running.  A signal cancels run()'s own task, the TaskGroup
+  cancels the tasks it started, and every `async with` block gets to run its
+  exit code.  A second signal skips the politeness and ends the process.
+
 Authorization flow:
   Only TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET are required.  bot.start()
   brings up twitchio's web adapter (/oauth on OAUTH_PORT); ensure_authorized()
@@ -22,6 +28,7 @@ Authorization flow:
 
 import asyncio
 import logging
+import signal
 from pathlib import Path
 
 from .bot import VoxBot, get_user_id
@@ -166,31 +173,122 @@ async def run() -> None:
             initial_delay=SCHEDULER_INITIAL_DELAY,
         )
 
-        # All long-running coroutines share one event loop.  None of them
-        # return under normal operation.  TaskGroup (unlike asyncio.gather)
-        # cancels the sibling tasks when one of them fails, so a fatal error
-        # in any component shuts the whole app down cleanly.
-        async with asyncio.TaskGroup() as tg:
-            # bot.start() logs in, loads TOKEN_FILE, brings up the OAuth web
-            # adapter, and then serves EventSub until shutdown.
-            tg.create_task(bot.start())  # Twitch EventSub WebSocket
-            tg.create_task(server.serve())  # Starlette HTTP + WebSocket server
-            tg.create_task(handler.process_queue())  # TTS synthesis loop
+        # From here on, "stop the program" is this function's job.  It used to
+        # belong to uvicorn by accident: uvicorn.Server.serve() replaces the
+        # process-wide SIGINT/SIGTERM handlers with its own, and server.serve()
+        # is one of the tasks started below.  On `docker stop` uvicorn restored
+        # the default handler and re-sent SIGTERM to the process, which killed
+        # it on the spot — inside the server task, before the task group
+        # unwound and before the `async with VoxBot` above could run its exit
+        # code (closing the EventSub session, cleaning up a half-written audio
+        # file, stopping a running ffmpeg child).  Ctrl-C did the same and
+        # printed a BaseExceptionGroup traceback on the way out.  The server no
+        # longer touches signals at all (see _QuietServer in voxer/server.py),
+        # and these handlers take over instead.
+        loop = asyncio.get_running_loop()
+        # asyncio.run() always drives run() inside a task, so this is never
+        # None in practice; the fallback below keeps the type checker honest.
+        main_task = asyncio.current_task()
+        installed: list[signal.Signals] = []
+        stopping = False
 
-            # Wait for login + adapter, then block until a user token exists
-            # (stored, env-seeded, or granted through the browser flow).
-            await bot.wait_until_ready()
-            await bot.ensure_authorized()
+        def _shutdown(sig: signal.Signals) -> None:
+            """Ask the whole application to stop, in response to one signal.
 
-            # Conduit subscriptions expire after 72h of downtime — re-register
-            # the bot's own channel on every boot (duplicates are tolerated).
-            await bot.subscribe_for(bot_id)
+            Cancelling this coroutine's own task is enough to stop everything:
+            asyncio.TaskGroup reacts to its parent being cancelled by
+            cancelling every task it started, and it does not treat a cancelled
+            child as a failure.  So the group finishes quietly, the `async
+            with` blocks around it get to run their exit code, and the process
+            leaves through the bottom of run() instead of being shot in the
+            head halfway through a task.
+            """
+            nonlocal stopping
+            if stopping:
+                # A second signal means the polite request is taking too long —
+                # something is refusing to let go of its cancellation.  Put the
+                # operating system's default behaviour back for this signal and
+                # send it to ourselves again, which ends the process at once.
+                # Without this, an impatient operator's only remaining option
+                # would be `kill -9`.
+                LOGGER.warning("Received %s again — exiting immediately", sig.name)
+                signal.signal(sig, signal.SIG_DFL)
+                signal.raise_signal(sig)
+                return
+            stopping = True
+            LOGGER.info("Received %s — shutting down", sig.name)
+            if main_task is not None:
+                main_task.cancel()
 
-            # The scheduler posts to chat, which needs the user token — start
-            # it only after authorization so it never 401s.
-            tg.create_task(scheduler.run())  # periodic chat message poster
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, _shutdown, sig)
+            except NotImplementedError:
+                # Windows' asyncio event loop cannot register signal handlers.
+                # There, Ctrl-C keeps Python's default behaviour of raising
+                # KeyboardInterrupt, which main() turns into the same one-line
+                # message; there is no SIGTERM on Windows to worry about.
+                LOGGER.debug("Event loop cannot handle %s here", sig.name)
+            else:
+                installed.append(sig)
+
+        try:
+            # All long-running coroutines share one event loop.  None of them
+            # return under normal operation.  TaskGroup (unlike asyncio.gather)
+            # cancels the sibling tasks when one of them fails, so a fatal error
+            # in any component shuts the whole app down cleanly.
+            async with asyncio.TaskGroup() as tg:
+                # bot.start() logs in, loads TOKEN_FILE, brings up the OAuth web
+                # adapter, and then serves EventSub until shutdown.
+                tg.create_task(bot.start())  # Twitch EventSub WebSocket
+                tg.create_task(server.serve())  # Starlette HTTP + WebSocket server
+                tg.create_task(handler.process_queue())  # TTS synthesis loop
+
+                # Wait for login + adapter, then block until a user token exists
+                # (stored, env-seeded, or granted through the browser flow).
+                await bot.wait_until_ready()
+                await bot.ensure_authorized()
+
+                # Conduit subscriptions expire after 72h of downtime — re-register
+                # the bot's own channel on every boot (duplicates are tolerated).
+                await bot.subscribe_for(bot_id)
+
+                # The scheduler posts to chat, which needs the user token — start
+                # it only after authorization so it never 401s.
+                tg.create_task(scheduler.run())  # periodic chat message poster
+        except* asyncio.CancelledError:
+            # Only reachable when _shutdown above cancelled us, because nothing
+            # else cancels this task.  A shutdown we asked for is not a crash,
+            # so it is swallowed here; letting it escape would print the same
+            # BaseExceptionGroup traceback this step exists to remove.  Errors
+            # of any other type are not caught and still propagate.
+            LOGGER.info("All components stopped")
+        finally:
+            # Hand the signals back before leaving, so that anything that runs
+            # after this point (the bot's own shutdown, below) reacts to Ctrl-C
+            # the ordinary way instead of calling a handler whose work is done.
+            for sig in installed:
+                loop.remove_signal_handler(sig)
 
 
 def main() -> None:
-    """Entry point: run the async event loop."""
-    asyncio.run(run())
+    """Entry point: run the async event loop.
+
+    The two clauses below exist so that the two endings an operator is likely
+    to meet each produce one readable line rather than a stack trace.
+    """
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        # A Ctrl-C that arrived before run() installed its own handlers — while
+        # the speech model was downloading, for example.  Python's default
+        # handler turns it into this exception.  Nothing is wrong, so there is
+        # nothing to show a stack trace for.
+        LOGGER.info("Shutting down")
+    except RuntimeError as exc:
+        # validate_config() reports an unusable configuration by raising
+        # RuntimeError with a message naming the environment variable at fault.
+        # That is something for the operator to fix in their .env file, not a
+        # bug to debug, so print the sentence and exit non-zero (SystemExit
+        # with a string prints it to stderr and sets the exit status to 1).
+        raise SystemExit(f"Configuration error: {exc}") from exc

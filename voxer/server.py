@@ -21,9 +21,11 @@ no "done" message is ever going to arrive for it.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
 
@@ -76,6 +78,46 @@ def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
     if path.parent != audio_dir.resolve():
         return None
     return path
+
+
+class _QuietServer(uvicorn.Server):
+    """A uvicorn server that leaves the process's signal handling alone.
+
+    Out of the box, ``uvicorn.Server.serve()`` is::
+
+        with self.capture_signals():
+            await self._serve(sockets)
+
+    and ``capture_signals`` replaces the process-wide handlers for SIGINT
+    (Ctrl-C) and SIGTERM (what ``docker stop`` sends) with uvicorn's own,
+    restores the previous ones when it exits, and then — after restoring them —
+    re-sends any signal it caught to the process with ``signal.raise_signal``.
+
+    That is the right behaviour for `uvicorn myapp:app` on the command line,
+    where uvicorn *is* the program.  Here it is not: the server is one of four
+    coroutines running under an ``asyncio.TaskGroup`` in voxer/app.py, so a
+    library buried inside one task was deciding what the whole program does
+    when it is asked to stop, from an unspecified moment after startup onwards.
+    The visible damage was on ``docker stop``: the re-sent SIGTERM met the
+    default handler again and killed the process immediately, inside the server
+    task, so the task group never unwound and the Twitch bot never got to close
+    its EventSub session or clean up the audio file it was in the middle of.
+    Ctrl-C took the same path and printed a ``BaseExceptionGroup`` traceback
+    wrapping the cancelled sibling tasks on the way out.
+
+    Overriding ``capture_signals`` with a context manager that does nothing
+    removes uvicorn from the decision entirely.  voxer/app.py installs one
+    handler per signal instead, in the one place that knows about every
+    component, and stopping is then an ordinary task cancellation.
+
+    Nothing else about the server changes: this class inherits every bit of
+    ``uvicorn.Server``, and ``serve()`` still starts and stops it the same way.
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        """Install no signal handlers, restore none, re-send none."""
+        yield
 
 
 class AudioServer:
@@ -312,6 +354,11 @@ class AudioServer:
         asyncio.TaskGroup (voxer/app.py).
         uvicorn's own logging is silenced (log_level="warning") because
         colorlog handles all application-level output.
+
+        The server is a _QuietServer rather than a plain uvicorn.Server so that
+        starting it does not change how the whole process reacts to Ctrl-C and
+        to `docker stop` — see that class for the full story.  Shutdown reaches
+        this task as an ordinary cancellation from voxer/app.py.
         """
         config = uvicorn.Config(
             self._app,
@@ -319,5 +366,4 @@ class AudioServer:
             port=self._port,
             log_level="warning",
         )
-        server = uvicorn.Server(config)
-        await server.serve()
+        await _QuietServer(config).serve()

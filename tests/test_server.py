@@ -1,7 +1,7 @@
-"""Unit tests for voxer.server: the overlay routes, the WebSocket protocol and
-the broadcast fan-out.
+"""Unit tests for voxer.server: the overlay routes, the WebSocket protocol,
+the broadcast fan-out and the uvicorn signal seam.
 
-Three groups of tests, each driving the code the way production does:
+Four groups of tests, each driving the code the way production does:
 
   - `resolve_audio_file` is a pure function, so it is called directly.
   - The HTTP routes and the WebSocket endpoint are exercised through the real
@@ -17,6 +17,9 @@ Three groups of tests, each driving the code the way production does:
     count of clients actually reached, which is what tells the handler whether
     an MP3 will ever be played) cannot be provoked through a real connection on
     demand.
+  - `_QuietServer.capture_signals()` is called directly and the process's
+    registered signal handlers are read back around it, because the thing being
+    checked is a side effect on the operating system rather than a value.
 
 A note on timing.  `TestClient` hands a WebSocket message to the application
 asynchronously: `send_text` returns as soon as the message is queued, not once
@@ -30,15 +33,17 @@ later effect is visible the earlier message has definitely been handled too.
 
 import asyncio
 import json
+import signal
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+import uvicorn
 from starlette.testclient import TestClient
 
 from voxer.models import BroadcastEvent, EmoteItem
-from voxer.server import AudioServer, resolve_audio_file
+from voxer.server import AudioServer, _QuietServer, resolve_audio_file
 
 # How long to wait for the server thread to act on a WebSocket message before
 # declaring the test failed.  Generous, because it is only ever paid in full
@@ -342,3 +347,100 @@ async def test_broadcast_drops_a_stalled_client_and_still_serves_the_rest(
     # finishes instead of sitting in receive_text() until uvicorn's keepalive
     # eventually notices.
     assert stalled.closed
+
+
+# --------------------------------------------------------------------------
+# _QuietServer — keeping uvicorn's hands off the process's signal handlers
+# --------------------------------------------------------------------------
+
+# The two signals uvicorn takes over by default, and the two the composition
+# root (voxer/app.py) installs its own handlers for: SIGINT is Ctrl-C, SIGTERM
+# is what `docker stop` and most process supervisors send.
+_SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+
+
+async def _null_app(scope: Any, receive: Any, send: Any) -> None:
+    """An ASGI application that does nothing, to satisfy uvicorn.Config.
+
+    uvicorn.Config insists on being given an application, but the tests below
+    never start the server — they only call capture_signals() — so the
+    application is never invoked.  `log_config=None` stops Config's constructor
+    from reconfiguring Python's logging for the rest of the test session.
+    """
+
+
+def _config() -> uvicorn.Config:
+    return uvicorn.Config(_null_app, log_config=None)
+
+
+def test_quiet_server_leaves_the_process_signal_handlers_alone() -> None:
+    """_QuietServer.capture_signals() must install nothing and restore nothing.
+
+    This is the seam that lets voxer/app.py own shutdown.  Stock uvicorn
+    replaces the SIGINT/SIGTERM handlers for as long as its server runs and
+    re-sends the signal it caught afterwards, which used to kill this process
+    from inside one task before the others could shut down (see _QuietServer's
+    own docstring).  Overriding the method is a small change that is easy to
+    lose in a later edit, so this test pins it: the handlers registered with
+    the operating system must be exactly the same before, during and after.
+    """
+    before = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+
+    with _QuietServer(_config()).capture_signals():
+        during = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+
+    after = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+
+    assert during == before
+    assert after == before
+
+
+def test_stock_uvicorn_still_installs_its_own_handlers() -> None:
+    """The behaviour _QuietServer exists to suppress is still uvicorn's.
+
+    Without this, the test above would keep passing if a future uvicorn
+    release stopped capturing signals — and nobody would know that the
+    override, and the comments explaining why it is there, had become
+    obsolete.  So this asserts the opposite of the test above against the
+    unmodified class: inside capture_signals() the handler for each signal is
+    uvicorn's, and afterwards the original one is back.
+    """
+    before = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+    stock = uvicorn.Server(_config())
+
+    with stock.capture_signals():
+        during = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+
+    after = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+
+    assert during == {sig: stock.handle_exit for sig in _SHUTDOWN_SIGNALS}
+    assert after == before
+
+
+async def test_serve_starts_a_server_that_captures_no_signals(
+    server: AudioServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AudioServer.serve() must start the quiet server, not a stock one.
+
+    The test above proves _QuietServer behaves; this one proves it is the class
+    actually used, which is the half a careless edit would undo.  uvicorn's own
+    `Server.serve` is replaced with a stand-in that records the server object
+    and returns immediately, so nothing binds a port and nothing runs forever;
+    then that recorded object's capture_signals() is exercised.  Reverting to
+    `uvicorn.Server(config)` would make the recorded object install uvicorn's
+    handlers here and fail the comparison.
+    """
+    started: list[uvicorn.Server] = []
+
+    async def _fake_serve(self: uvicorn.Server, sockets: Any = None) -> None:
+        started.append(self)
+
+    monkeypatch.setattr(uvicorn.Server, "serve", _fake_serve)
+
+    await server.serve()
+
+    assert len(started) == 1
+    before = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+    with started[0].capture_signals():
+        during = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
+    assert during == before
