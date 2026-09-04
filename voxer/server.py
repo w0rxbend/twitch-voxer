@@ -24,7 +24,11 @@ refreshed mid-playback never sends its "done" message, and neither does one
 whose connection drops between receiving the event and finishing the clip.
 sweep_audio_dir() deletes what is left over, and reap_audio() runs it on a
 timer for the whole life of the process, so audio_dir cannot grow without
-bound across a long stream.
+bound across a long stream.  That timer judges a clip by how long ago it was
+written, which is only a guess at "abandoned", so AudioServer keeps the names
+it is still owed a "done" message for (outstanding_files) and the sweep spares
+those whatever their age -- the browser plays one clip at a time and can hold a
+queue, so an outstanding clip is not an abandoned one.
 """
 
 import asyncio
@@ -33,7 +37,7 @@ import dataclasses
 import json
 import logging
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Final
 
@@ -88,7 +92,11 @@ def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
     return path
 
 
-def sweep_audio_dir(audio_dir: Path, min_age_secs: float = 0.0) -> int:
+def sweep_audio_dir(
+    audio_dir: Path,
+    min_age_secs: float = 0.0,
+    spare: Collection[str] = (),
+) -> int:
     """Delete leftover MP3s from audio_dir and report how many were removed.
 
     Everything in audio_dir is a temporary clip: it is written just before it
@@ -110,6 +118,16 @@ def sweep_audio_dir(audio_dir: Path, min_age_secs: float = 0.0) -> int:
             are stale.  A running bot passes a real age instead, because a file
             created seconds ago may still be on its way to a browser, and
             deleting it then would cut a clip off mid-sentence.
+        spare: File names to leave alone whatever their age.  Age is only ever
+            a guess at "nobody is coming back for this", and it is a bad guess
+            for a clip the overlay has been told about but has not finished
+            playing: the browser queues events and plays them one at a time, so
+            a busy chat -- or a browser tab that is waiting for the viewer to
+            click before it is allowed to play audio at all -- can leave a file
+            legitimately outstanding for far longer than any threshold.
+            AudioServer passes the names it is still expecting a "done" message
+            for, so those are never judged by age.  Empty by default, which is
+            what the startup sweep wants: nothing can be outstanding yet.
 
     Returns:
         The number of files actually deleted, so the caller can decide whether
@@ -118,6 +136,8 @@ def sweep_audio_dir(audio_dir: Path, min_age_secs: float = 0.0) -> int:
     cutoff = time.time() - min_age_secs
     removed = 0
     for mp3 in audio_dir.glob("*.mp3"):
+        if mp3.name in spare:
+            continue
         try:
             # With no minimum age every file qualifies, so the modification
             # time is not consulted at all — asking for it would add a way to
@@ -137,7 +157,12 @@ def sweep_audio_dir(audio_dir: Path, min_age_secs: float = 0.0) -> int:
     return removed
 
 
-async def reap_audio(audio_dir: Path, interval: float, min_age: float) -> None:
+async def reap_audio(
+    audio_dir: Path,
+    interval: float,
+    min_age: float,
+    outstanding: Callable[[], Collection[str]] = lambda: (),
+) -> None:
     """Sweep audio_dir on a timer, for as long as the application runs.
 
     This is one of the long-running coroutines the composition root starts in
@@ -154,10 +179,16 @@ async def reap_audio(audio_dir: Path, interval: float, min_age: float) -> None:
         interval: Seconds to wait between sweeps.
         min_age: Minimum age in seconds before a file is deleted — see
             sweep_audio_dir, which does the actual work.
+        outstanding: Called once per sweep to ask which file names must be
+            spared regardless of age.  A callable rather than a set because the
+            answer changes between sweeps: pass AudioServer.outstanding_files
+            so each sweep sees the clips the overlay currently owes a "done"
+            message for.  The default answers "none", which keeps this function
+            usable on its own.
     """
     while True:
         await asyncio.sleep(interval)
-        removed = sweep_audio_dir(audio_dir, min_age)
+        removed = sweep_audio_dir(audio_dir, min_age, outstanding())
         # Silence when there is nothing to do is the point: this runs every few
         # minutes forever, and a line per sweep would bury the events an
         # operator actually reads.  A count that is not zero is worth seeing,
@@ -235,7 +266,21 @@ class AudioServer:
         # Set of active WebSocket connections; used by broadcast() for fan-out.
         # A plain set is fine here because all access happens on the single asyncio thread.
         self._clients: set[WebSocket] = set()
+        # Names of clips handed to at least one browser that have not been
+        # reported as played yet.  reap_audio reads this through
+        # outstanding_files() so it never deletes a file the overlay is still
+        # going to ask for.  Same thread as _clients, so no lock is needed.
+        self._outstanding: set[str] = set()
         self._app = self._build_app()
+
+    def outstanding_files(self) -> frozenset[str]:
+        """Names of clips a browser has been sent but has not finished playing.
+
+        The audio reaper (reap_audio) calls this once per sweep and spares
+        everything it names.  A copy is returned rather than the live set so a
+        caller cannot alter the server's state by accident.
+        """
+        return frozenset(self._outstanding)
 
     def _build_app(self) -> Starlette:
         """Build the Starlette ASGI application: the complete list of URLs served.
@@ -310,6 +355,12 @@ class AudioServer:
             # than a fact, and one that was wrong whenever two clients dropped
             # at once.
             self._clients.discard(websocket)
+            if not self._clients:
+                # Nobody is left to send a "done" message, so every clip still
+                # outstanding really has been abandoned.  Releasing them here
+                # hands them back to the reaper, which would otherwise spare
+                # them for the rest of the process's life.
+                self._outstanding.clear()
             LOGGER.info(
                 "WebSocket client disconnected — %d client(s) remaining",
                 len(self._clients),
@@ -330,6 +381,7 @@ class AudioServer:
         if path is None:
             LOGGER.warning("Rejected suspicious filename: %r", filename)
             return
+        self._outstanding.discard(path.name)
         path.unlink(missing_ok=True)
         LOGGER.debug("Cleaned up audio file: %s", filename)
 
@@ -433,6 +485,10 @@ class AudioServer:
         if dead:
             LOGGER.warning("Dropped %d stale client(s)", len(dead))
         self._clients -= dead
+        if delivered:
+            # Some browser now owns this clip and owes us a "done" message for
+            # it, so the reaper must not judge it by age until that arrives.
+            self._outstanding.add(Path(event.audio_url).name)
         return delivered
 
     async def serve(self) -> None:

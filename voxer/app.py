@@ -295,6 +295,7 @@ async def run() -> None:
                         audio_dir,
                         AUDIO_SWEEP_INTERVAL_SECS,
                         AUDIO_MAX_AGE_SECS,
+                        server.outstanding_files,
                     )
                 )
 

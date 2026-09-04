@@ -145,6 +145,29 @@ def test_done_message_deletes_the_audio_file(
             assert _wait_until_deleted(clip)
 
 
+def test_last_client_leaving_releases_the_outstanding_clips(
+    server: AudioServer,
+) -> None:
+    """When nobody is connected, an outstanding clip is an abandoned one.
+
+    Outstanding names are held so the reaper does not delete a clip a browser
+    is still going to play.  Once the last overlay disconnects, no "done"
+    message can ever arrive for those names, so holding them would protect
+    those files from the reaper for the rest of the process's life -- the exact
+    leak the reaper exists to close.
+    """
+    with TestClient(server._app) as client:
+        with client.websocket_connect("/ws"):
+            server._outstanding.add("queued.mp3")
+        # Leaving the `with` block closes the socket; the endpoint's cleanup
+        # runs on the server side, so give it a moment to be observed.
+        deadline = time.time() + 5
+        while server._outstanding and time.time() < deadline:
+            time.sleep(0.01)
+
+    assert server.outstanding_files() == frozenset()
+
+
 def test_done_message_with_traversal_leaves_outside_file_alone(
     server: AudioServer, tmp_path: Path
 ) -> None:
@@ -422,6 +445,56 @@ def test_sweep_deletes_only_the_files_past_the_cutoff(tmp_path: Path) -> None:
     assert removed == 1
     assert not abandoned.exists()
     assert playing_now.exists()
+
+
+def test_sweep_spares_a_clip_the_overlay_still_owes_a_done_message(
+    tmp_path: Path,
+) -> None:
+    """An outstanding clip survives however old it looks.
+
+    Age is only a guess at "nobody is coming back for this", and it is a bad
+    guess while a browser is holding the clip: the overlay plays one at a time
+    and keeps a queue, and a tab that has not been clicked yet is not allowed
+    to play audio at all, so a legitimately outstanding clip can easily be
+    older than the five-minute cutoff.  Deleting it would break the overlay's
+    promise that every broadcast clip stays fetchable until it is played.
+    """
+    outstanding = _mp3(tmp_path, "queued.mp3", age_secs=600)
+    abandoned = _mp3(tmp_path, "forgotten.mp3", age_secs=600)
+
+    removed = sweep_audio_dir(tmp_path, min_age_secs=300, spare={"queued.mp3"})
+
+    assert removed == 1
+    assert outstanding.exists()
+    assert not abandoned.exists()
+
+
+async def test_broadcast_marks_a_delivered_clip_outstanding(
+    server: AudioServer,
+) -> None:
+    """A clip a browser accepted is protected from the reaper until it is played."""
+    server._clients = {FakeSocket()}
+
+    await server.broadcast(_event())
+
+    assert server.outstanding_files() == frozenset({"clip.mp3"})
+
+    # The "done" message is the browser saying it finished, so the protection
+    # ends there — the file is deleted anyway, and must not be spared forever.
+    server._delete_played_audio("clip.mp3")
+    assert server.outstanding_files() == frozenset()
+
+
+async def test_broadcast_that_reached_nobody_marks_nothing_outstanding(
+    server: AudioServer,
+) -> None:
+    """With no client there is no "done" message to wait for.
+
+    MessageHandler deletes the file itself in this case (broadcast returns 0),
+    so sparing it would leave the reaper guarding a name that no longer exists.
+    """
+    assert await server.broadcast(_event()) == 0
+    assert server.outstanding_files() == frozenset()
 
 
 def test_sweep_leaves_files_that_are_not_mp3s_alone(tmp_path: Path) -> None:
