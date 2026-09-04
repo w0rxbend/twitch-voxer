@@ -38,7 +38,7 @@ FFMPEG_STDERR_LINES: int = 5
 class TTSService:
     """Thin wrapper around Supertonic TTS with a voice-style cache."""
 
-    def __init__(self, voices_dir: Path | None = None) -> None:
+    def __init__(self, voices_dir: Path | None = None, *, engine: Any = None) -> None:
         """Initialize the TTS engine and prepare the voice style cache.
 
         On the very first run, Supertonic downloads the model weights (~100 MB).
@@ -47,10 +47,17 @@ class TTSService:
         Args:
             voices_dir: Optional directory of custom voice JSON files to preload.
                         Each *.json file becomes a named voice in the pool.
+            engine: Optional pre-built synthesis engine to use instead of
+                    constructing Supertonic.  Production never passes this;
+                    tests pass a stand-in object so that checking how voices
+                    are loaded does not download ~100 MB of model weights.
+                    It is deliberately untyped rather than hidden behind a
+                    Protocol: there is exactly one real engine, and the style
+                    objects it returns are opaque to this class either way.
         """
         LOGGER.debug("Initialising TTS engine...")
         # auto_download=True lets Supertonic fetch the model on first use
-        self._tts = TTS(auto_download=True)
+        self._tts = engine if engine is not None else TTS(auto_download=True)
         # Map of voice_name → style object, populated lazily or at init time
         self._voice_cache: dict[str, Any] = {}
         self._custom_voice_names: list[str] = []
@@ -65,6 +72,16 @@ class TTSService:
         Files that fail to load are skipped with a warning — one bad file should
         not prevent the others from loading.
         """
+        # A directory that does not exist is the common symptom of a mistyped
+        # VOXER_VOICES_DIR.  Path.glob() on a missing directory yields nothing
+        # and raises nothing, so without this check the previous code announced
+        # "Loading custom voices from: ..." and then silently loaded none, with
+        # the built-in voice pool hiding the mistake.  Say so instead.
+        if not voices_dir.is_dir():
+            LOGGER.warning(
+                "Voices dir does not exist, no custom voices: %s", voices_dir.resolve()
+            )
+            return
         LOGGER.info("Loading custom voices from: %s", voices_dir.resolve())
         for json_file in sorted(voices_dir.glob("*.json")):
             name = json_file.stem
@@ -73,7 +90,12 @@ class TTSService:
                 self._custom_voice_names.append(name)
                 LOGGER.info("Custom voice loaded: %s (%s)", name, json_file.resolve())
             except Exception as exc:
-                LOGGER.warning("Failed to load custom voice %s: %s", name, exc)
+                # exc_info=True prints the traceback as well as the message: the
+                # message alone from a malformed JSON file or a shape the engine
+                # rejects rarely says which line of which file was the problem.
+                LOGGER.warning(
+                    "Failed to load custom voice %s: %s", name, exc, exc_info=True
+                )
 
     @property
     def voice_names(self) -> list[str]:

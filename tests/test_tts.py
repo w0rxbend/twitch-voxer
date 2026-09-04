@@ -1,23 +1,30 @@
-"""Unit tests for the ffmpeg wrapper in voxer.tts.
+"""Unit tests for voxer.tts: custom-voice loading and the ffmpeg wrapper.
 
-`TTSService.to_mp3` is a static method, so these tests call it directly on the
-class.  That is deliberate: constructing a real TTSService starts Supertonic,
-which downloads roughly 100 MB of model weights on a cold machine, and none of
-that is needed to check how the subprocess is driven.
+Neither group constructs the real speech engine.  Supertonic downloads roughly
+100 MB of model weights on a cold machine, which is far too much to pay for
+tests that never synthesise a single word.
 
-Instead of running the real ffmpeg (which may not be installed, and whose exact
-wording differs between builds), each test writes a tiny shell script into
-tmp_path and passes it as `ffmpeg_bin=`.  The script decides the exit code and
-what lands on stderr, so the tests can pin the failure path exactly.
+  - `TTSService.to_mp3` is a static method, so those tests call it straight on
+    the class.  Rather than running the real ffmpeg (which may not be installed,
+    and whose exact wording differs between builds), each test writes a tiny
+    shell script into tmp_path and passes it as `ffmpeg_bin=`.  The script
+    decides the exit code and what lands on stderr, so the failure path can be
+    pinned exactly.
+
+  - The voice-loading tests construct a real TTSService but hand it a stub
+    engine through the `engine=` keyword argument, so `__init__` skips building
+    Supertonic.  The stub implements only `get_voice_style_from_path`, which is
+    the single engine method involved in loading custom voices.
 """
 
 import asyncio
+import logging
 import stat
 from pathlib import Path
 
 import pytest
 
-from voxer.tts import FFMPEG_STDERR_LINES, TTSService
+from voxer.tts import BUILTIN_VOICES, FFMPEG_STDERR_LINES, TTSService
 
 
 def make_fake_ffmpeg(tmp_path: Path, *, exit_code: int, stderr: str = "") -> Path:
@@ -124,3 +131,123 @@ class TestToMp3:
                 await TTSService.to_mp3(
                     tmp_path / "in.wav", tmp_path / "out.mp3", ffmpeg_bin=str(fake)
                 )
+
+
+class StubEngine:
+    """Stands in for the Supertonic engine while custom voices are loaded.
+
+    A real engine reads a JSON file and returns an opaque "voice style" object
+    that only the engine itself understands.  TTSService never looks inside that
+    object — it stores it in a cache and hands it back to the engine later — so
+    the stub can return a plain string and nothing downstream can tell.
+
+    Args:
+        failing_stems: Filenames (without the .json extension) that this engine
+                       refuses to load, standing in for a corrupt or malformed
+                       voice file.
+    """
+
+    def __init__(self, *, failing_stems: frozenset[str] = frozenset()) -> None:
+        self._failing_stems = failing_stems
+        # Every path the engine was asked to load, in the order it was asked.
+        self.requested: list[Path] = []
+
+    def get_voice_style_from_path(self, path: Path) -> str:
+        self.requested.append(path)
+        if path.stem in self._failing_stems:
+            raise ValueError(f"not a voice file: {path.name}")
+        return f"style-for-{path.stem}"
+
+
+def write_voice_files(directory: Path, *names: str) -> None:
+    """Create one empty <name>.json file per name.
+
+    The contents do not matter: the stub engine decides what loading a file
+    does, and the real engine is never involved.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (directory / f"{name}.json").write_text("{}")
+
+
+class TestCustomVoiceLoading:
+    def test_voice_names_are_file_stems_after_the_builtins(
+        self, tmp_path: Path
+    ) -> None:
+        """Each *.json file adds one voice, named after the file, at the end.
+
+        Order matters to nothing functionally, but the built-ins coming first
+        is what the docstring on `voice_names` promises, and app.py feeds that
+        list straight into VoiceStore as the pool of assignable voices.
+        """
+        voices_dir = tmp_path / "voices"
+        write_voice_files(voices_dir, "narrator", "robot")
+        # A non-JSON file in the same directory must be ignored rather than
+        # becoming a voice called "readme".
+        (voices_dir / "readme.txt").write_text("these are my voices")
+
+        service = TTSService(voices_dir, engine=StubEngine())
+
+        assert service.voice_names == [*BUILTIN_VOICES, "narrator", "robot"]
+
+    def test_one_unloadable_file_does_not_stop_the_others(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A file the engine rejects is skipped; its siblings still load.
+
+        This is the promise the whole voice pool rests on: one hand-edited JSON
+        file with a stray comma must cost that one voice, not every voice.
+        """
+        voices_dir = tmp_path / "voices"
+        write_voice_files(voices_dir, "alpha", "broken", "charlie")
+        engine = StubEngine(failing_stems=frozenset({"broken"}))
+
+        with caplog.at_level(logging.WARNING, logger="voxer.tts"):
+            service = TTSService(voices_dir, engine=engine)
+
+        assert service.voice_names == [*BUILTIN_VOICES, "alpha", "charlie"]
+        # The engine was still asked for all three, so the skip happened at the
+        # failure rather than by abandoning the loop.
+        assert [path.stem for path in engine.requested] == [
+            "alpha",
+            "broken",
+            "charlie",
+        ]
+        assert "broken" in caplog.text
+
+    def test_empty_dir_yields_only_the_builtins(self, tmp_path: Path) -> None:
+        """A directory that exists but holds no voice files is not an error."""
+        voices_dir = tmp_path / "voices"
+        voices_dir.mkdir()
+
+        service = TTSService(voices_dir, engine=StubEngine())
+
+        assert service.voice_names == BUILTIN_VOICES
+
+    def test_missing_dir_warns_and_yields_only_the_builtins(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A configured directory that does not exist says so out loud.
+
+        This is the behaviour change in this commit.  Path.glob() on a missing
+        directory yields nothing and raises nothing, so a mistyped
+        VOXER_VOICES_DIR used to log a cheerful "Loading custom voices from:"
+        and then load none, with the built-in pool masking the mistake.
+        """
+        missing = tmp_path / "typo" / "voices"
+
+        with caplog.at_level(logging.WARNING, logger="voxer.tts"):
+            service = TTSService(missing, engine=StubEngine())
+
+        assert service.voice_names == BUILTIN_VOICES
+        assert "Voices dir does not exist" in caplog.text
+        assert str(missing.resolve()) in caplog.text
+
+    def test_no_voices_dir_never_touches_the_engine(self) -> None:
+        """Omitting voices_dir leaves the built-in pool and loads nothing."""
+        engine = StubEngine()
+
+        service = TTSService(engine=engine)
+
+        assert service.voice_names == BUILTIN_VOICES
+        assert engine.requested == []
