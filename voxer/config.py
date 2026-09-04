@@ -80,8 +80,9 @@ def _env_csv(name: str, default: str) -> list[str]:
 
 # ── Twitch API credentials ────────────────────────────────────────────────────
 # These belong to the *bot* Twitch account's application (dev.twitch.tv console).
-# They are the ONLY required settings: user tokens are obtained interactively
-# via the browser OAuth flow on first startup and persisted to TOKEN_FILE.
+# Together with TWITCH_BOT_USERNAME below they are the only required settings:
+# user tokens are obtained interactively via the browser OAuth flow on first
+# startup and persisted to TOKEN_FILE.
 CLIENT_ID: str = os.getenv("TWITCH_CLIENT_ID", "")
 CLIENT_SECRET: str = os.getenv("TWITCH_CLIENT_SECRET", "")
 # Optional seed tokens: when set AND no token file exists yet, they are added
@@ -90,12 +91,21 @@ CLIENT_SECRET: str = os.getenv("TWITCH_CLIENT_SECRET", "")
 ACCESS_TOKEN: str = os.getenv("TWITCH_ACCESS_TOKEN", "")
 REFRESH_TOKEN: str = os.getenv("TWITCH_REFRESH_TOKEN", "")
 # Login name (slug) of the bot Twitch account, used to look up its numeric ID.
-BOT_USERNAME: str = os.getenv("TWITCH_BOT_USERNAME", "worxbend")
+# There is deliberately no default.  This used to fall back to one specific
+# person's Twitch handle, which meant anyone who cloned this repository and
+# forgot the variable got no error at all: the bot resolved a stranger's login
+# to a numeric account ID and then ran under that identity for the whole
+# session.  Empty here, and rejected by validate_config() at startup instead.
+BOT_USERNAME: str = os.getenv("TWITCH_BOT_USERNAME", "")
 
-# Names of the environment variables that must be non-empty for the bot to run.
-_REQUIRED_VARS: tuple[str, ...] = (
-    "TWITCH_CLIENT_ID",
-    "TWITCH_CLIENT_SECRET",
+# The credentials that must be non-empty before anything can talk to Twitch,
+# each paired with the environment variable it came from.  The pairing exists
+# because the check and the error message need different halves: the check runs
+# against the *values* the rest of the program consumes, while the message has
+# to name the *variable* an operator edits in .env.
+_REQUIRED_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("TWITCH_CLIENT_ID", CLIENT_ID),
+    ("TWITCH_CLIENT_SECRET", CLIENT_SECRET),
 )
 
 # ── Storage paths ─────────────────────────────────────────────────────────────
@@ -232,20 +242,49 @@ def validate_redirect_url(url: str) -> None:
         )
 
 
-def validate_config() -> None:
-    """Check the whole configuration, raising RuntimeError on the first problem.
+def validate_credentials() -> None:
+    """Check the Twitch application credentials, naming every missing one.
 
-    Two rules are applied, in order:
-      1. every required environment variable is set — reported as one list, so
-         a misconfigured deployment learns about all of them at once rather
-         than one restart at a time;
-      2. the OAuth redirect URL is one Twitch could actually redirect to.
+    All of them are reported in a single message, so an operator who left two
+    variables blank learns about both at once instead of one restart at a time.
 
-    Called once by the composition root before any component starts.
+    The check reads CLIENT_ID and CLIENT_SECRET — the constants every other
+    module actually consumes — rather than calling os.getenv() a second time.
+    Re-reading the environment agreed with the constants only by coincidence:
+    both happened to come from the same process environment, so any later
+    stripping, aliasing or fallback applied while building a constant would
+    have been invisible to the check, and the program could start with a
+    credential the validator had approved under a different value.
+
+    This is a separate function from validate_config() because the emote-fetch
+    script (voxer.fetch_emotes) needs exactly these two values and nothing
+    else: it runs its own local OAuth callback server and never signs in as
+    the bot account, so enforcing the bot's settings there would reject a
+    setup that works perfectly well.
     """
-    missing = [key for key in _REQUIRED_VARS if not os.getenv(key)]
+    missing = [name for name, value in _REQUIRED_CREDENTIALS if not value]
     if missing:
         raise RuntimeError(
             "Required environment variables are not set: " + ", ".join(missing)
+        )
+
+
+def validate_config() -> None:
+    """Check the whole configuration, raising RuntimeError on the first problem.
+
+    Three rules are applied, in order:
+      1. the Twitch application credentials are present (validate_credentials);
+      2. the bot account's login name is set;
+      3. the OAuth redirect URL is one Twitch could actually redirect to.
+
+    Called once by the composition root before any component starts.
+    """
+    validate_credentials()
+    if not BOT_USERNAME:
+        raise RuntimeError(
+            "TWITCH_BOT_USERNAME is not set: it must be the Twitch login name "
+            "of the account this bot signs in as. There is no default, because "
+            "a wrong one is silent — the login is resolved to a numeric Twitch "
+            "account ID and used as the bot's identity for the whole run."
         )
     validate_redirect_url(OAUTH_REDIRECT_URL)

@@ -96,7 +96,7 @@ sequenceDiagram
     participant sch as Scheduler
 
     main->>app: main() → asyncio.run(run())
-    app->>app: setup_logging() → validate_config()  ← only CLIENT_ID/SECRET
+    app->>app: setup_logging() → validate_config()  ← CLIENT_ID/SECRET, BOT_USERNAME, redirect URL
     app->>app: mkdir audio dir + token-file dir, sweep stale *.mp3
     app->>tts: TTSService(voices_dir)
     app->>srv: AudioServer(audio_dir, host, port)

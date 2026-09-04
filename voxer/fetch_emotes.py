@@ -47,20 +47,12 @@ from pathlib import Path
 from . import config
 
 
-def _require_env(key: str) -> str:
-    """Read a required environment variable, raising clearly if it is absent."""
-    value = os.environ.get(key)
-    if not value:
-        raise RuntimeError(f"Required environment variable {key!r} is not set")
-    return value
-
-
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 # Credentials come from voxer.config, which is the single place that reads .env
 # and owns the variable names.  They are read leniently there (defaulting to "")
 # so this module imports cleanly in tests; main() re-checks them via
-# _require_env() to fail fast with a clear message.
+# config.validate_credentials() to fail fast with a clear message.
 CLIENT_ID: str = config.CLIENT_ID
 CLIENT_SECRET: str = config.CLIENT_SECRET
 # Optional: if set, the script tries to refresh this token before the full OAuth
@@ -453,8 +445,12 @@ def main() -> None:
     Duplicate emote names (same name in multiple channels) are deduplicated
     by keeping the first occurrence — typically the global version.
     """
-    for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"):
-        _require_env(key)
+    # Only the two application credentials — deliberately not the bot's whole
+    # configuration.  config.validate_config() would additionally require
+    # TWITCH_BOT_USERNAME and a working OAuth redirect URL, and this script
+    # uses neither: it talks to the Twitch API directly and, when it needs a
+    # user token, runs its own local callback server on REDIRECT_URI above.
+    config.validate_credentials()
     # parents=True because the path is configurable: a value such as
     # VOXER_EMOTES_DB_PATH=/data/voxer/emotes/emotes.db nests more than one
     # level deep, and without it the very first run on a fresh volume would

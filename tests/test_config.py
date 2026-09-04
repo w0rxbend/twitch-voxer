@@ -10,7 +10,15 @@ instead of quietly changing what the program does.
 The helpers read `os.environ` when they are called, not when the module is
 imported, so these tests can drive them directly with `monkeypatch.setenv`
 without reimporting anything.
+
+The startup validators are tested here too.  They read module *constants*,
+which were built once during import, so those tests replace the constants with
+`monkeypatch.setattr` rather than the environment — that is also what keeps
+them giving the same answer on a machine with a filled-in .env and in CI,
+which has none.
 """
+
+import os
 
 import pytest
 
@@ -157,3 +165,143 @@ class TestConstantsAreParsed:
         for path in config.EMOTE_SOUND_PATHS:
             assert path == path.strip()
             assert path != ""
+
+    def test_bot_username_has_no_built_in_default(self) -> None:
+        """The login name must come from the environment or be empty.
+
+        It used to default to one specific person's Twitch handle, so a clone
+        of this repository that forgot the variable started successfully and
+        ran as that stranger's account.  Comparing the constant against the
+        raw environment pins that away: if the literal default came back, this
+        fails on any machine where TWITCH_BOT_USERNAME is unset — which is
+        every CI run, since CI has no .env file.
+        """
+        assert config.BOT_USERNAME == os.environ.get("TWITCH_BOT_USERNAME", "")
+
+
+class TestValidateCredentials:
+    """The two Twitch application credentials, checked as values not as names.
+
+    Every test replaces `_REQUIRED_CREDENTIALS` rather than the environment,
+    because that tuple is built once while the module is imported.  Doing it
+    this way also means these tests give the same answer on a developer
+    machine with a filled-in .env and in CI, which has none.
+    """
+
+    def test_reports_every_missing_credential_in_one_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Someone who left both blank should learn both on the first restart,
+        not discover the second one after fixing the first."""
+        monkeypatch.setattr(
+            config,
+            "_REQUIRED_CREDENTIALS",
+            (("TWITCH_CLIENT_ID", ""), ("TWITCH_CLIENT_SECRET", "")),
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            config.validate_credentials()
+        message = str(excinfo.value)
+        assert "TWITCH_CLIENT_ID" in message
+        assert "TWITCH_CLIENT_SECRET" in message
+
+    def test_names_only_the_credential_that_is_actually_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            config,
+            "_REQUIRED_CREDENTIALS",
+            (("TWITCH_CLIENT_ID", "an-id"), ("TWITCH_CLIENT_SECRET", "")),
+        )
+        with pytest.raises(RuntimeError) as excinfo:
+            config.validate_credentials()
+        message = str(excinfo.value)
+        assert "TWITCH_CLIENT_SECRET" in message
+        assert "TWITCH_CLIENT_ID" not in message
+
+    def test_accepts_credentials_that_are_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            config,
+            "_REQUIRED_CREDENTIALS",
+            (("TWITCH_CLIENT_ID", "an-id"), ("TWITCH_CLIENT_SECRET", "a-secret")),
+        )
+        config.validate_credentials()
+
+    def test_checks_the_values_in_use_not_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The environment variables are set here, yet the constants built from
+        them are empty — which is precisely the disagreement the old check
+        could not see, because it called os.getenv() a second time instead of
+        looking at the values the rest of the program consumes."""
+        monkeypatch.setenv("TWITCH_CLIENT_ID", "present-in-the-environment")
+        monkeypatch.setenv("TWITCH_CLIENT_SECRET", "present-in-the-environment")
+        monkeypatch.setattr(
+            config,
+            "_REQUIRED_CREDENTIALS",
+            (("TWITCH_CLIENT_ID", ""), ("TWITCH_CLIENT_SECRET", "")),
+        )
+        with pytest.raises(RuntimeError, match="TWITCH_CLIENT_ID"):
+            config.validate_credentials()
+
+
+class TestValidateConfig:
+    """The startup check the composition root runs before anything else.
+
+    The fixture below makes every rule pass, so each test can break exactly
+    one of them and know which rule produced the error.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _a_working_configuration(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            config,
+            "_REQUIRED_CREDENTIALS",
+            (("TWITCH_CLIENT_ID", "an-id"), ("TWITCH_CLIENT_SECRET", "a-secret")),
+        )
+        monkeypatch.setattr(config, "BOT_USERNAME", "examplebot")
+        monkeypatch.setattr(
+            config, "OAUTH_REDIRECT_URL", "http://localhost:4343/oauth/callback"
+        )
+
+    def test_accepts_a_complete_configuration(self) -> None:
+        config.validate_config()
+
+    def test_rejects_an_empty_bot_username(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reason this setting is required at all: without a name there is
+        no account to run as, and the old fallback picked one silently."""
+        monkeypatch.setattr(config, "BOT_USERNAME", "")
+        with pytest.raises(RuntimeError, match="TWITCH_BOT_USERNAME"):
+            config.validate_config()
+
+    def test_missing_credentials_are_reported_first(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Order matters for the message someone reads: with nothing filled in
+        at all, the credentials are the first thing to go and get, so they are
+        what the error should be about."""
+        monkeypatch.setattr(
+            config,
+            "_REQUIRED_CREDENTIALS",
+            (("TWITCH_CLIENT_ID", ""), ("TWITCH_CLIENT_SECRET", "")),
+        )
+        monkeypatch.setattr(config, "BOT_USERNAME", "")
+        with pytest.raises(RuntimeError) as excinfo:
+            config.validate_config()
+        message = str(excinfo.value)
+        assert "TWITCH_CLIENT_ID" in message
+        assert "TWITCH_BOT_USERNAME" not in message
+
+    def test_still_rejects_an_unusable_redirect_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The redirect-URL rule was there before and must survive the two new
+        checks being added in front of it."""
+        monkeypatch.setattr(
+            config, "OAUTH_REDIRECT_URL", "http://bot.example.org/oauth/callback"
+        )
+        with pytest.raises(RuntimeError, match="VOXER_OAUTH_REDIRECT_URL"):
+            config.validate_config()

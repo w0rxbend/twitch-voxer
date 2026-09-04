@@ -339,7 +339,7 @@ at the front of the queue until you interact.
 | `TWITCH_CLIENT_SECRET` | *(required)* | Twitch application Client Secret |
 | `TWITCH_ACCESS_TOKEN` | *(empty)* | Optional seed token — used once to populate the token file when it does not exist yet, skipping the browser flow. Normally leave empty. |
 | `TWITCH_REFRESH_TOKEN` | *(empty)* | Optional seed refresh token, paired with `TWITCH_ACCESS_TOKEN` |
-| `TWITCH_BOT_USERNAME` | `worxbend` | Login name of the bot Twitch account |
+| `TWITCH_BOT_USERNAME` | *(required)* | Login name of the bot Twitch account. No default — the bot runs as whichever account this names, so a wrong value fails silently rather than loudly |
 | `VOXER_OAUTH_HOST` | `localhost` | Host the one-time OAuth authorization server binds to (`0.0.0.0` in Docker so the published port reaches it) |
 | `VOXER_OAUTH_PORT` | `4343` | Port of the OAuth authorization server — must match the redirect URL registered in the Twitch dev console |
 | `VOXER_OAUTH_REDIRECT_URL` | `http://localhost:4343/oauth/callback` | The full OAuth Redirect URL — must match exactly what is registered in the Twitch dev console; set an `https://` URL for reverse-proxy setups (non-localhost hosts must be `https://`; validated at startup) |
