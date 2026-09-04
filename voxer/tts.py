@@ -122,8 +122,10 @@ class TTSService:
         This method is synchronous and CPU-bound.  Callers must run it via
         asyncio.to_thread() to avoid blocking the event loop.
 
-        The caller is responsible for deleting the returned WAV file.
-        MessageHandler._synthesize_and_broadcast() does this in a finally block.
+        The returned WAV belongs to the caller: nothing here or in the operating
+        system's temp-file machinery deletes it, so the caller must unlink it
+        once it is done with it (a try/finally is the reliable way, because the
+        MP3 conversion in between can raise).
 
         Args:
             text: Text to synthesize (may include Supertonic expression tags like <laugh>).

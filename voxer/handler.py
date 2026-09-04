@@ -5,8 +5,13 @@ Pipeline for a USER message:
                               (textnorm.is_bot).
   2. Emoji extraction       — Unicode emoji are stripped from the text and collected
                               as EmoteItems for the browser overlay (textnorm.extract_emojis).
-  3. Emote-only short-circuit — if no text remains and the message contained only
-                              Twitch emotes, play a random notification sound instead.
+  3. Emote-only short-circuit — when step 2 leaves no speakable text at all —
+                              a message of only Twitch emotes, only Unicode
+                              emoji, or only whitespace — a random notification
+                              sound is played instead, and the emotes still go
+                              to the overlay.  Nothing at all is played when no
+                              emote resolved to an image, or when no sound
+                              files are configured (VOXER_EMOTE_SOUND_PATHS).
   4. Language detection     — langdetect classifies text as "uk" (Ukrainian) or "en"
                               (English); anything else falls back to "uk".
   5. Voice assignment       — each username gets a random voice on first message;

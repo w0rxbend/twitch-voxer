@@ -221,7 +221,9 @@ class VoxBot(commands.AutoBot):
     """Twitch EventSub bot that feeds chat events into the TTS message queue.
 
     Inherits from AutoBot which manages the EventSub WebSocket, token storage,
-    and built-in OAuth flow at /oauth/authorize.
+    and the built-in OAuth flow: /oauth (the page a human opens to start the
+    authorization) and /oauth/callback (the redirect target Twitch sends the
+    granted code back to).
     """
 
     def __init__(

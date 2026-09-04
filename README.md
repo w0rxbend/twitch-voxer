@@ -333,6 +333,8 @@ at the front of the queue until you interact.
 
 ## Configuration Reference
 
+Every setting is read from the environment (or from a `.env` file in the working directory) at startup. [`.env.example`](.env.example) is the authoritative list: it ships with every variable, its default, and a comment explaining when you would change it, so if this table and that file ever disagree, believe the file.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TWITCH_CLIENT_ID` | *(required)* | Twitch application Client ID |
@@ -345,13 +347,23 @@ at the front of the queue until you interact.
 | `VOXER_OAUTH_REDIRECT_URL` | `http://localhost:4343/oauth/callback` | The full OAuth Redirect URL — must match exactly what is registered in the Twitch dev console; set an `https://` URL for reverse-proxy setups (non-localhost hosts must be `https://`; validated at startup) |
 | `VOXER_TOKEN_FILE` | `data/tokens.json` | Where obtained OAuth tokens are persisted and auto-refreshed |
 | `VOXER_DB_PATH` | `data/voices.json` | Path to the pickledb file storing username → voice mappings |
+| `VOXER_TIMESTAMPS_DB_PATH` | `data/timestamps.json` | Path to the pickledb file storing when each chatter last spoke — the record the announce window below is measured against |
 | `VOXER_MESSAGES_PATH` | `data/messages.json` | Path to the scheduled messages file |
+| `VOXER_EMOTES_DB_PATH` | `emotes/emotes.db` | Path to the pickledb file of emote name → image URLs. Written by `uv run voxer-fetch-emotes` and read once at startup; if you change this, the fetcher and the bot both follow it |
+| `VOXER_VOICES_DIR` | `voices` | Directory scanned for custom voice `*.json` files. Each file's name (without the extension) becomes a voice on top of the ten built-in ones; a directory that does not exist is reported in the log rather than ignored |
 | `VOXER_AUDIO_DIR` | `audio` | Directory where MP3 files are temporarily stored |
 | `VOXER_SERVER_HOST` | `0.0.0.0` | Host the HTTP/WebSocket server binds to |
 | `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
+| `VOXER_WS_SEND_TIMEOUT` | `5` | Seconds one overlay client may take to accept a WebSocket message before the server drops it. A paused OBS source or a sleeping laptop keeps its connection open but stops reading it, which would otherwise stall every message behind it |
+| `VOXER_AUDIO_SWEEP_INTERVAL_SECS` | `300` | How often a background task looks for abandoned MP3 files in `VOXER_AUDIO_DIR`. A clip is normally deleted as soon as the overlay reports it finished playing; a browser that crashes or is refreshed mid-clip never sends that report |
+| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | How old an MP3 must be before that sweep deletes it. Do not lower this: a younger file may still be queued for synthesis, on its way to the browser, or playing right now |
 | `VOXER_SCHEDULER_EMPTY_RETRY_DELAY` | `600` | Delay before re-checking when the scheduled-message list is empty (`VOXER_SCHEDULER_INTERVAL` is a deprecated alias) |
 | `VOXER_SCHEDULER_INITIAL_DELAY` | `10` | Seconds to wait before the first scheduled message |
 | `VOXER_MESSAGE_QUEUE_MAXSIZE` | `20` | How many messages may wait for speech synthesis at once. Synthesis takes seconds per message, so this bound keeps the overlay from falling minutes behind a busy chat: once the queue is full, new chat messages are dropped (and logged), while channel events wait for room. |
+| `VOXER_ANNOUNCE_WINDOW_SECS` | `300` | Seconds of silence from a chatter before their name is spoken again as a "username says:" prefix. Within the window their messages are read out on their own |
+| `VOXER_NO_ANNOUNCE_USERS` | the value of `TWITCH_BOT_USERNAME` | Comma-separated logins that never get the "username says:" prefix (case-insensitive). Setting it **replaces** the default rather than adding to it, so include the bot's own login if you set it |
+| `VOXER_EMOTE_SOUND_PATHS` | `emotes/slack-message.mp3,emotes/discord.mp3` | Comma-separated MP3 files, one picked at random, played for a message that has no speakable text (only emotes or emoji). An empty list means such messages are skipped |
+| `VOXER_LOG_LEVEL` | `INFO` | Root log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. An unrecognised name is reported on stderr and falls back to `INFO` rather than stopping the bot |
 
 ---
 
@@ -391,16 +403,16 @@ twitch-voxer/
 ├── main.py                  # Entrypoint (calls voxer.app.main)
 ├── voxer/
 │   ├── __init__.py          # Package docstring + __version__ (import-light)
-│   ├── app.py               # Composition root — wires all components together
+│   ├── app.py               # Composition root — wires everything together, owns shutdown signals
 │   ├── config.py            # Environment variable loading
 │   ├── bot.py               # Twitch adapter (twitchio AutoBot + EventSub + OAuth flow)
 │   ├── handler.py           # Pipeline orchestration (message → audio)
 │   ├── textnorm.py          # Pure text rules (bot filter, emoji, normalisation, abbrevs)
 │   ├── stores.py            # pickledb persistence (VoiceStore, AnnounceTracker, EmoteStore)
-│   ├── models.py            # Shared dataclasses (QueuedMessage, BroadcastEvent, ...)
+│   ├── models.py            # Shared dataclasses + the helper that builds the /audio URL
 │   ├── tts.py               # TTS infrastructure (Supertonic WAV + ffmpeg MP3)
-│   ├── fetch_emotes.py      # Downloads emote images into emotes/emotes.db
-│   ├── server.py            # HTTP + WebSocket server (Starlette)
+│   ├── fetch_emotes.py      # One-shot emote-cache builder (VOXER_EMOTES_DB_PATH), run by hand
+│   ├── server.py            # HTTP + WebSocket server (Starlette) + audio-file cleanup
 │   ├── scheduler.py         # Periodic chat message scheduler
 │   ├── events.py            # Channel-event announcement strings
 │   ├── log.py               # Colourful logging setup
@@ -408,7 +420,7 @@ twitch-voxer/
 │       ├── index.html       # Full OBS overlay (3D speaker + effects)
 │       ├── simple.html      # Lightweight overlay
 │       └── overlay.js       # Shared overlay runtime (queueing, WebSocket, playback)
-├── tests/                   # Unit tests (textnorm, scheduler, events, stores, server)
+├── tests/                   # Unit tests (config, text rules, stores, handler, bot, tts, server, ...)
 ├── data/
 │   └── messages.json        # Scheduled messages (pickledb format)
 ├── docker-compose.yml
@@ -420,7 +432,7 @@ twitch-voxer/
 
 ## Development
 
-Run the unit test suite (47 tests covering text normalisation, the scheduler, event strings, the persistence stores, and the server's path guard):
+Run the unit test suite (configuration parsing, text normalisation, the persistence stores, the message pipeline, the scheduler, the TTS wrappers, and the overlay server's routes, path guard and WebSocket protocol):
 
 ```bash
 uv run pytest
