@@ -3,7 +3,9 @@
 These tests cover the parts of the auth flow that run without a network:
 reading the twitchio-format token file, preferring a still-valid access token
 over a refresh (which would rotate the pair), writing rotated pairs back
-atomically, and tolerating missing or malformed files.
+atomically, and tolerating missing or malformed files.  They also pin the one
+other thing fetch_emotes decides at import time without a network: where its
+emote cache is written.
 """
 
 import json
@@ -12,8 +14,21 @@ from pathlib import Path
 import pytest
 import requests
 
-from voxer import fetch_emotes
+from voxer import config, fetch_emotes
 from voxer.config import parse_redirect_url, validate_redirect_url
+
+
+class TestOutputFile:
+    def test_output_file_follows_configured_emote_db_path(self) -> None:
+        """The writer must target the same file the bot reads.
+
+        voxer/app.py builds its EmoteStore from config.EMOTES_DB_PATH, so if
+        this script wrote somewhere else, setting VOXER_EMOTES_DB_PATH would
+        split the two apart.  EmoteStore starts empty (with only a warning)
+        when its file is missing, so that split would never raise — emotes
+        would just stop appearing in the overlay.
+        """
+        assert fetch_emotes.OUTPUT_FILE == Path(config.EMOTES_DB_PATH)
 
 
 class TestParseRedirectUrl:

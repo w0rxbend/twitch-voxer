@@ -1,7 +1,8 @@
 """One-shot script to fetch and cache Twitch emotes into a local pickledb file.
 
-Run this once (or periodically) to populate emotes/emotes.db, which the bot
-reads at startup to resolve Twitch emote names to image URLs for the overlay.
+Run this once (or periodically) to populate the emote cache at
+VOXER_EMOTES_DB_PATH (default emotes/emotes.db), which the bot reads at
+startup to resolve Twitch emote names to image URLs for the overlay.
 
 What it collects:
   - Global Twitch emotes (available in every channel)
@@ -72,7 +73,14 @@ BASE_URL = "https://api.twitch.tv/helix"
 REDIRECT_URI = "http://localhost:1337/api/connect/twitch/callback"
 # Minimum scopes needed to list followed and follower channels
 SCOPES = ["user:read:follows", "moderator:read:followers"]
-OUTPUT_FILE = Path("emotes/emotes.db")
+# Where the emote cache is written.  This must be the same file the bot reads
+# (app.py builds its EmoteStore from config.EMOTES_DB_PATH), so it is derived
+# from config rather than hardcoded here: if it were hardcoded, anyone setting
+# VOXER_EMOTES_DB_PATH would have this script write one file and the bot read
+# another, and EmoteStore treats a missing file as "start empty" with only a
+# warning — so the only symptom would be emotes silently never appearing.
+# config.EMOTES_DB_PATH is a str; this module treats it as a Path throughout.
+OUTPUT_FILE = Path(config.EMOTES_DB_PATH)
 # The main app persists its OAuth tokens here (twitchio JSON format:
 # {user_id: {"user_id", "token", "refresh", "last_validated"}}).  Reusing it
 # means this script needs no OAuth flow of its own once the bot has run once.
@@ -439,7 +447,7 @@ def fetch_channel_emotes(
 
 
 def main() -> None:
-    """Fetch all emotes and write them to emotes/emotes.db.
+    """Fetch all emotes and write them to OUTPUT_FILE (VOXER_EMOTES_DB_PATH).
 
     The output file maps emote name → {url_1x, url_2x, url_4x}.
     Duplicate emote names (same name in multiple channels) are deduplicated
@@ -447,7 +455,11 @@ def main() -> None:
     """
     for key in ("TWITCH_CLIENT_ID", "TWITCH_CLIENT_SECRET"):
         _require_env(key)
-    OUTPUT_FILE.parent.mkdir(exist_ok=True)
+    # parents=True because the path is configurable: a value such as
+    # VOXER_EMOTES_DB_PATH=/data/voxer/emotes/emotes.db nests more than one
+    # level deep, and without it the very first run on a fresh volume would
+    # fail with FileNotFoundError after doing all the downloading.
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     with requests.Session() as session:
         print("Getting app token...")
