@@ -28,6 +28,12 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 # loaded from voices/*.json are appended to these by the voice_names property.
 BUILTIN_VOICES: list[str] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4", "F5"]
 
+# How many trailing lines of ffmpeg's stderr to quote when conversion fails.
+# ffmpeg opens every run with a long banner (version, build flags, the list of
+# libraries it was compiled against); the sentence that says what actually went
+# wrong is at the very end, so only the tail is worth putting in an exception.
+FFMPEG_STDERR_LINES: int = 5
+
 
 class TTSService:
     """Thin wrapper around Supertonic TTS with a voice-style cache."""
@@ -123,31 +129,61 @@ class TTSService:
         LOGGER.debug("WAV saved: %s", path)
         return path
 
-    async def to_mp3(self, wav_path: Path, mp3_path: Path) -> None:
+    @staticmethod
+    async def to_mp3(
+        wav_path: Path, mp3_path: Path, *, ffmpeg_bin: str = "ffmpeg"
+    ) -> None:
         """Convert a WAV file to MP3 using ffmpeg as an async subprocess.
 
         ffmpeg is called with -y (overwrite output) because mp3_path is a new
         UUID-named file that should not already exist, but -y is a safe guard.
-        stdout/stderr are suppressed; errors are surfaced via the return code.
+        stdout is discarded, but stderr is captured: it is where ffmpeg explains
+        a failure (missing encoder, unreadable input, no space left on device),
+        and the tail of it is quoted in the raised error so an operator reading
+        the log does not have to reconstruct and re-run the command by hand.
+
+        This is a static method: it uses no engine state, which also means the
+        ffmpeg wrapper can be exercised without constructing a TTSService (that
+        downloads ~100 MB of model weights).  Calling it through an instance,
+        as MessageHandler does, keeps working unchanged.
 
         Args:
             wav_path: Source WAV file path (will be deleted by the caller).
             mp3_path: Destination MP3 file path (served by AudioServer).
+            ffmpeg_bin: Executable to run.  Defaults to "ffmpeg" from PATH;
+                        tests point it at a stand-in script.
 
         Raises:
-            RuntimeError: If ffmpeg exits with a non-zero return code.
+            RuntimeError: If ffmpeg exits with a non-zero return code.  The
+                message carries the exit code and the tail of ffmpeg's stderr.
         """
         LOGGER.debug("Converting to MP3: %s", mp3_path.name)
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg",
+            ffmpeg_bin,
             "-y",
             "-i",
             str(wav_path),
             str(mp3_path),
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        returncode = await proc.wait()
-        if returncode != 0:
-            raise RuntimeError(f"ffmpeg failed (exit {returncode}) for {mp3_path.name}")
+        # communicate() rather than wait(): now that stderr is a pipe, its
+        # operating-system buffer can fill up, and a process whose stderr is
+        # full blocks forever waiting for someone to read it.  wait() never
+        # reads, so it would deadlock; communicate() drains while it waits.
+        _, err = await proc.communicate()
+        if proc.returncode != 0:
+            lines = [
+                line.strip()
+                for line in (err or b"").decode("utf-8", errors="replace").splitlines()
+                if line.strip()
+            ]
+            detail = (
+                " | ".join(lines[-FFMPEG_STDERR_LINES:])
+                if lines
+                else "no stderr output"
+            )
+            raise RuntimeError(
+                f"ffmpeg failed (exit {proc.returncode}) for {mp3_path.name}: {detail}"
+            )
         LOGGER.debug("MP3 ready: %s", mp3_path.name)
