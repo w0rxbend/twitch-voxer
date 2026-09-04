@@ -5,12 +5,19 @@ filtering, Unicode-emoji extraction, and the text normalisation pipeline that
 turns a raw chat message into something a TTS voice can speak naturally
 (URL replacement, abbreviation expansion, laugh tags).
 
+Everything that differs between languages — the spoken stand-in for a URL, the
+abbreviation table and its regex, the "username says:" template — lives in one
+LanguageRules entry per language in the RULES table, so the set of supported
+languages is a single explicit fact (SUPPORTED_LANGS) instead of something
+inferred from whichever dictionary a caller happened to look in.
+
 Extracted from handler.py so the rules can be unit-tested without importing
 the TTS engine, twitchio, or any other heavyweight dependency.
 """
 
 import logging
 import re
+from typing import Final, NamedTuple
 
 import emoji as emoji_lib
 
@@ -42,25 +49,18 @@ KNOWN_BOTS: frozenset[str] = frozenset(
     }
 )
 
-# ── i18n announcement templates ───────────────────────────────────────────────
-
-# Templates used to prefix messages with "username says:" when the announce
-# window has elapsed.  Keyed by language code detected from the message text.
-ANNOUNCEMENTS: dict[str, str] = {
-    "en": "The user {username} says: {text}",
-    "uk": "Користувач {username} каже: {text}",
-}
-
-# Replacement text for URLs, chosen based on the detected language of the message.
-LINK_REPLACEMENTS: dict[str, str] = {
-    "en": "... see link in the chat ...",
-    "uk": "... дивіться посилання в чаті ...",
-}
-
 # ── Regular expressions ───────────────────────────────────────────────────────
 
 # Matches http:// and https:// URLs so they can be replaced with spoken text.
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+
+# The expression tag the TTS engine understands as "laugh here", and the burst of
+# three that a laugh token is actually replaced with.  One laugh is too short to
+# be audible, so the tag is repeated; naming the burst keeps the replacement text
+# and the prepended copy below from drifting apart, which is what a twice-typed
+# string literal invites.
+_LAUGH_TAG: Final[str] = "<laugh>"
+_LAUGH_BURST: Final[str] = ",".join([_LAUGH_TAG] * 3)
 
 # Matches common laugh expressions in English and Ukrainian/Cyrillic.
 # Each match is replaced with the TTS-native <laugh> expression tag.
@@ -211,15 +211,84 @@ def _build_abbrev_re(abbrevs: dict[str, str]) -> re.Pattern:
     )
 
 
-# Pre-compiled at module load time — avoids re-compiling on every message.
-_ABBREV_RE_EN: re.Pattern = _build_abbrev_re(_ABBREVS_EN)
-_ABBREV_RE_UK: re.Pattern = _build_abbrev_re(_ABBREVS_UK)
+# ── Per-language rules ────────────────────────────────────────────────────────
+
+
+class LanguageRules(NamedTuple):
+    """Every language-dependent value the message pipeline needs, in one place.
+
+    Grouping these means adding a third language is a single new entry in RULES
+    rather than a new key in each of several parallel dictionaries.  It also
+    makes a partially-supported language impossible: previously the link phrase
+    was looked up with a graceful `.get(lang, default)` while the abbreviation
+    table was chosen with `if lang == "uk"`, so an unexpected code such as "de"
+    would have been given Ukrainian link phrasing together with English
+    abbreviations.  One lookup cannot produce that mixture.
+
+    Attributes:
+        link_replacement: Spoken phrase substituted for any URL in the message.
+        abbrevs: Lower-cased abbreviation → expansion lookup for this language.
+        abbrev_re: Pattern matching exactly the keys of `abbrevs`, longest first.
+        announcement: "username says:" template, formatted with {username}/{text}.
+    """
+
+    link_replacement: str
+    abbrevs: dict[str, str]
+    abbrev_re: re.Pattern
+    announcement: str
+
+
+# The regexes are compiled once here, at module load time, rather than on every
+# message.  RULES is the single source of truth for "which languages does this
+# bot support?" — see SUPPORTED_LANGS below, which handler.py consults when
+# language detection returns something unexpected.
+RULES: dict[str, LanguageRules] = {
+    "en": LanguageRules(
+        link_replacement="... see link in the chat ...",
+        abbrevs=_ABBREVS_EN,
+        abbrev_re=_build_abbrev_re(_ABBREVS_EN),
+        announcement="The user {username} says: {text}",
+    ),
+    "uk": LanguageRules(
+        link_replacement="... дивіться посилання в чаті ...",
+        abbrevs=_ABBREVS_UK,
+        abbrev_re=_build_abbrev_re(_ABBREVS_UK),
+        announcement="Користувач {username} каже: {text}",
+    ),
+}
+
+# The set of language codes this module can speak, derived from the table rather
+# than typed out a second time.
+SUPPORTED_LANGS: frozenset[str] = frozenset(RULES)
+
+
+def rules_for(lang: str) -> LanguageRules:
+    """Return the rules for a language code, falling back to DEFAULT_LANG.
+
+    The fallback happens exactly once, for the whole set of rules at a time, so
+    an unsupported code always gets one language's rules in full and never a
+    mixture of two.
+    """
+    return RULES.get(lang, RULES[DEFAULT_LANG])
+
 
 # ── Twemoji URL helpers ───────────────────────────────────────────────────────
 
 # Base URL for Twemoji PNG assets (72×72 px).  Used to build image URLs for
 # Unicode emoji so the browser overlay can display them alongside Twitch emotes.
 _TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72"
+
+# Two Unicode characters that render as nothing at all.  Written as escapes and
+# given names because a literal U+200D is invisible in a diff, in a code review
+# and in most editors — and is silently deleted by any tool that strips
+# zero-width characters, which would break emoji URLs with no visible cause.
+#
+# Zero-Width Joiner: glues several emoji into one compound emoji, e.g. man +
+# ZWJ + woman + ZWJ + girl renders as a single family emoji.
+_ZWJ: Final[str] = "\u200d"
+# Variation Selector-16: asks for the colourful emoji rendering of a character
+# that also has a plain-text form, e.g. U+2764 ("❤") + VS16 gives the red heart.
+_VARIATION_SELECTOR_16: Final[int] = 0xFE0F
 
 
 def emoji_url(char: str) -> str:
@@ -230,8 +299,10 @@ def emoji_url(char: str) -> str:
     sequences ("❤️‍🔥" → "2764-fe0f-200d-1f525.png") — matching how the assets
     are actually named in the Twemoji repository.
     """
-    has_zwj = "‍" in char
-    codepoints = "-".join(f"{ord(c):x}" for c in char if has_zwj or ord(c) != 0xFE0F)
+    has_zwj = _ZWJ in char
+    codepoints = "-".join(
+        f"{ord(c):x}" for c in char if has_zwj or ord(c) != _VARIATION_SELECTOR_16
+    )
     return f"{_TWEMOJI_BASE}/{codepoints}.png"
 
 
@@ -263,22 +334,26 @@ def normalize(text: str, lang: str) -> str:
       3. Replace laugh tokens with the TTS <laugh> tag and also prepend it
          so the voice opens with laughter before reading the rest.
 
+    Every language-dependent value comes from one LanguageRules entry, so an
+    unrecognised code falls back to DEFAULT_LANG for all of them together.
+
     Args:
         text: Cleaned message text (emoji already stripped).
-        lang: Detected language code ("uk" or "en").
+        lang: Detected language code; anything outside SUPPORTED_LANGS is
+            treated as DEFAULT_LANG.
 
     Returns:
         Normalised text ready for TTS synthesis.
     """
-    link_replacement = LINK_REPLACEMENTS.get(lang, LINK_REPLACEMENTS[DEFAULT_LANG])
-    text, link_count = _URL_RE.subn(link_replacement, text)
+    rules = rules_for(lang)
+    text, link_count = _URL_RE.subn(rules.link_replacement, text)
 
-    abbrevs = _ABBREVS_UK if lang == "uk" else _ABBREVS_EN
-    abbrev_re = _ABBREV_RE_UK if lang == "uk" else _ABBREV_RE_EN
     # subn with a lambda performs a case-insensitive lookup in the dict
-    text, abbrev_count = abbrev_re.subn(lambda m: abbrevs[m.group(0).lower()], text)
+    text, abbrev_count = rules.abbrev_re.subn(
+        lambda m: rules.abbrevs[m.group(0).lower()], text
+    )
 
-    text, laugh_count = _LAUGH_RE.subn("<laugh>,<laugh>,<laugh>", text)
+    text, laugh_count = _LAUGH_RE.subn(_LAUGH_BURST, text)
     if link_count:
         LOGGER.debug("Replaced %d link(s)", link_count)
     if abbrev_count:
@@ -286,5 +361,5 @@ def normalize(text: str, lang: str) -> str:
     if laugh_count:
         LOGGER.debug("Applied %d <laugh> tag(s): %s", laugh_count, text)
         # Prepend laugh so the voice starts laughing *before* reading the message
-        text = "<laugh>,<laugh>,<laugh>" + text
+        text = _LAUGH_BURST + text
     return text

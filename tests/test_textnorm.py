@@ -1,6 +1,15 @@
 """Unit tests for the pure text-processing rules in voxer.textnorm."""
 
-from voxer.textnorm import extract_emojis, is_bot, normalize
+from voxer.textnorm import (
+    _ABBREVS_EN,
+    _ABBREVS_UK,
+    DEFAULT_LANG,
+    RULES,
+    extract_emojis,
+    is_bot,
+    normalize,
+    rules_for,
+)
 
 
 class TestIsBot:
@@ -83,3 +92,39 @@ class TestExtractEmojis:
         clean, items = extract_emojis("😀😀")
         assert clean == ""
         assert len(items) == 2
+
+
+class TestLanguageRules:
+    def test_latin_abbreviations_defined_in_every_language(self) -> None:
+        """Every Latin abbreviation the English table knows must exist in Ukrainian.
+
+        Language detection is a guess: "gg" or "ggwp" typed in an otherwise
+        Ukrainian sentence is still classified as Ukrainian, so the Ukrainian
+        table is the one consulted for it.  A key present only in _ABBREVS_EN is
+        therefore silently never expanded for those messages — the voice reads
+        the raw letters aloud.  The reverse is not required: _ABBREVS_UK also
+        holds native Cyrillic keys ("хз", "гг") that have no English counterpart.
+        """
+        missing = sorted(set(_ABBREVS_EN) - set(_ABBREVS_UK))
+        assert not missing, (
+            "these abbreviations exist in _ABBREVS_EN but not in _ABBREVS_UK, "
+            f"so they are never expanded in Ukrainian messages: {missing}"
+        )
+
+    def test_unsupported_language_gets_one_language_in_full(self) -> None:
+        """An unrecognised code falls back once, not field by field.
+
+        Before the rules table, the link phrase fell back gracefully while the
+        abbreviation table was picked with `if lang == "uk"`, so a code such as
+        "de" would have produced Ukrainian link phrasing next to English
+        abbreviation expansions.  One lookup makes that mixture impossible.
+        """
+        assert rules_for("de") is RULES[DEFAULT_LANG]
+
+    def test_unsupported_language_normalizes_entirely_as_the_default(self) -> None:
+        """The same guarantee, observed through normalize() rather than the table."""
+        out = normalize("ggwp https://example.com", "de")
+        assert out == normalize("ggwp https://example.com", DEFAULT_LANG)
+        # And that fallback really is Ukrainian, not a coincidental match.
+        assert "добре зіграно" in out
+        assert "посилання" in out

@@ -41,7 +41,14 @@ from langdetect import detect, LangDetectException
 
 from .models import BroadcastEvent, EmoteItem, MessageKind, QueuedMessage
 from .stores import AnnounceTracker, EmoteStore, VoiceStore
-from .textnorm import ANNOUNCEMENTS, DEFAULT_LANG, extract_emojis, is_bot, normalize
+from .textnorm import (
+    DEFAULT_LANG,
+    SUPPORTED_LANGS,
+    extract_emojis,
+    is_bot,
+    normalize,
+    rules_for,
+)
 from .tts import TTSService
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -125,7 +132,7 @@ class MessageHandler:
         """
         try:
             lang = await asyncio.to_thread(detect, text)
-            resolved = lang if lang in ANNOUNCEMENTS else DEFAULT_LANG
+            resolved = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
             LOGGER.debug("Detected lang: %s -> %s", lang, resolved)
             return resolved
         except LangDetectException:
@@ -202,15 +209,18 @@ class MessageHandler:
     async def _handle_system(self, message: QueuedMessage) -> None:
         """Synthesise a channel-event announcement directly, bypassing all user checks.
 
-        Uses a random voice from the pool.  Always synthesised in Ukrainian because
-        all event announcement strings in events.py are written in Ukrainian.
+        Uses a random voice from the pool.  Synthesised in DEFAULT_LANG, which is
+        Ukrainian, because all event announcement strings in events.py are written
+        in Ukrainian.  Naming the constant rather than repeating the literal "uk"
+        keeps this site in step with the language the rest of the pipeline falls
+        back to, instead of quietly disagreeing with it after a future change.
         """
         LOGGER.info("Announcing system event for %s", message.username)
         await self._synthesize_and_broadcast(
             username=message.username,
             final_text=message.text,
             voice=self._voice_store.random_voice(),
-            lang="uk",
+            lang=DEFAULT_LANG,
             emotes=self._resolve_emotes(message.emote_names, []),
             avatar_url=message.avatar_url,
         )
@@ -270,7 +280,7 @@ class MessageHandler:
         # announce window elapsed AND the user is not on the no-announce list.
         announce = await self._announce_tracker.claim(message.username)
         if announce and message.username.lower() not in self._no_announce_users:
-            final_text = ANNOUNCEMENTS[lang].format(
+            final_text = rules_for(lang).announcement.format(
                 username=message.username, text=normalized
             )
             LOGGER.debug("Announcing prefix for %s (outside window)", message.username)

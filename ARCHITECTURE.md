@@ -193,7 +193,7 @@ flowchart LR
     RAW[raw text] --> EM[strip emojis\nextract_emojis]
     EM --> LANG[detect language\n_detect_lang\nuk / en]
     LANG --> URL[replace URLs\n_URL_RE\n→ 'see link in chat']
-    URL --> ABB[expand abbreviations\n_ABBREV_RE_UK / EN\ne.g. wtf→what the f\nhz→хто зна]
+    URL --> ABB[expand abbreviations\nrules_for(lang).abbrev_re\ne.g. wtf→what the f\nhz→хто зна]
     ABB --> LAUGH[convert laugh tokens\n_LAUGH_RE\n→ TTS <laugh> tag]
     LAUGH --> ANN{announce\nwindow?}
     ANN -- outside window --> PREFIX[prepend\nusername says:]
