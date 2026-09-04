@@ -60,11 +60,11 @@ def _require_env(key: str) -> str:
 # and owns the variable names.  They are read leniently there (defaulting to "")
 # so this module imports cleanly in tests; main() re-checks them via
 # _require_env() to fail fast with a clear message.
-CLIENT_ID: str      = config.CLIENT_ID
-CLIENT_SECRET: str  = config.CLIENT_SECRET
+CLIENT_ID: str = config.CLIENT_ID
+CLIENT_SECRET: str = config.CLIENT_SECRET
 # Optional: if set, the script tries to refresh this token before the full OAuth
 # flow.  Empty string when unset, so every check on it must be a truthiness test.
-REFRESH_TOKEN: str  = config.REFRESH_TOKEN
+REFRESH_TOKEN: str = config.REFRESH_TOKEN
 
 BASE_URL = "https://api.twitch.tv/helix"
 # The local redirect URI that Twitch sends the authorization code to.
@@ -82,6 +82,7 @@ TOKEN_FILE = Path(config.TOKEN_FILE)
 
 # ── Authentication helpers ────────────────────────────────────────────────────
 
+
 def get_app_token(session: requests.Session) -> str:
     """Obtain a client-credentials app token (no user context).
 
@@ -90,7 +91,11 @@ def get_app_token(session: requests.Session) -> str:
     """
     resp = session.post(
         "https://id.twitch.tv/oauth2/token",
-        params={"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET, "grant_type": "client_credentials"},
+        params={
+            "client_id": CLIENT_ID,
+            "client_secret": CLIENT_SECRET,
+            "grant_type": "client_credentials",
+        },
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
@@ -162,7 +167,7 @@ def refresh_from_token_file(
     needed = set(SCOPES) if needed is None else needed
     try:
         tokens: dict[str, dict] = json.loads(TOKEN_FILE.read_text())
-    except (FileNotFoundError, ValueError, OSError):
+    except FileNotFoundError, ValueError, OSError:
         return None
     if not isinstance(tokens, dict):
         return None
@@ -216,9 +221,7 @@ def validate_token_scopes(session: requests.Session, token: str) -> set[str]:
     return set(resp.json().get("scopes", []))
 
 
-def token_has_scopes(
-    session: requests.Session, token: str, needed: set[str]
-) -> bool:
+def token_has_scopes(session: requests.Session, token: str, needed: set[str]) -> bool:
     """Return True when token is valid AND carries every scope in needed.
 
     A token that validates but lacks a scope is useless to this script, so the
@@ -343,6 +346,7 @@ def get_user_token(session: requests.Session) -> str:
 
 # ── Twitch API helpers ────────────────────────────────────────────────────────
 
+
 def hdrs(token: str) -> dict:
     """Build the standard Twitch API request headers for the given token."""
     return {"Client-Id": CLIENT_ID, "Authorization": f"Bearer {token}"}
@@ -355,7 +359,9 @@ def get_current_user(session: requests.Session, token: str) -> dict:
     return resp.json()["data"][0]
 
 
-def paginate(session: requests.Session, url: str, token: str, params: dict) -> list[dict]:
+def paginate(
+    session: requests.Session, url: str, token: str, params: dict
+) -> list[dict]:
     """Fetch all pages from a cursor-paginated Twitch API endpoint.
 
     Twitch paginates results using a cursor returned in `pagination.cursor`.
@@ -377,15 +383,29 @@ def paginate(session: requests.Session, url: str, token: str, params: dict) -> l
     return results
 
 
-def fetch_followed_ids(session: requests.Session, token: str, user_id: str) -> list[str]:
+def fetch_followed_ids(
+    session: requests.Session, token: str, user_id: str
+) -> list[str]:
     """Return broadcaster IDs for all channels the user follows."""
-    items = paginate(session, f"{BASE_URL}/channels/followed", token, {"user_id": user_id, "first": 100})
+    items = paginate(
+        session,
+        f"{BASE_URL}/channels/followed",
+        token,
+        {"user_id": user_id, "first": 100},
+    )
     return [i["broadcaster_id"] for i in items]
 
 
-def fetch_follower_ids(session: requests.Session, token: str, broadcaster_id: str) -> list[str]:
+def fetch_follower_ids(
+    session: requests.Session, token: str, broadcaster_id: str
+) -> list[str]:
     """Return user IDs for all followers of the given broadcaster."""
-    items = paginate(session, f"{BASE_URL}/channels/followers", token, {"broadcaster_id": broadcaster_id, "first": 100})
+    items = paginate(
+        session,
+        f"{BASE_URL}/channels/followers",
+        token,
+        {"broadcaster_id": broadcaster_id, "first": 100},
+    )
     return [i["user_id"] for i in items]
 
 
@@ -396,13 +416,19 @@ def fetch_global_emotes(session: requests.Session, token: str) -> list[dict]:
     return resp.json()["data"]
 
 
-def fetch_channel_emotes(session: requests.Session, token: str, broadcaster_id: str) -> list[dict]:
+def fetch_channel_emotes(
+    session: requests.Session, token: str, broadcaster_id: str
+) -> list[dict]:
     """Return channel-specific emotes for the given broadcaster.
 
     Returns an empty list for channels that have no emotes or don't exist (400/404),
     rather than raising, so a single missing channel doesn't abort the whole fetch.
     """
-    resp = session.get(f"{BASE_URL}/chat/emotes", headers=hdrs(token), params={"broadcaster_id": broadcaster_id})
+    resp = session.get(
+        f"{BASE_URL}/chat/emotes",
+        headers=hdrs(token),
+        params={"broadcaster_id": broadcaster_id},
+    )
     if resp.status_code in (400, 404):
         return []
     resp.raise_for_status()
@@ -410,6 +436,7 @@ def fetch_channel_emotes(session: requests.Session, token: str, broadcaster_id: 
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     """Fetch all emotes and write them to emotes/emotes.db.
@@ -456,10 +483,14 @@ def main() -> None:
             channel_emotes.extend(emotes)
             if i % 20 == 0:
                 # Progress checkpoint + brief sleep to stay within Twitch rate limits
-                print(f"  {i}/{len(all_channel_ids)} done ({len(channel_emotes)} emotes so far)...")
+                print(
+                    f"  {i}/{len(all_channel_ids)} done ({len(channel_emotes)} emotes so far)..."
+                )
                 time.sleep(0.3)
 
-        print(f"  {len(channel_emotes)} channel emotes from {len(all_channel_ids)} channels")
+        print(
+            f"  {len(channel_emotes)} channel emotes from {len(all_channel_ids)} channels"
+        )
 
         print(f"\nWriting to {OUTPUT_FILE}...")
         seen: set[str] = set()
@@ -472,7 +503,14 @@ def main() -> None:
                 imgs = emote["images"]
                 # pickledb's set() is a dual sync/async method; outside an event
                 # loop it runs synchronously, so the "coroutine" is never awaited
-                _ = db.set(name, {"url_1x": imgs["url_1x"], "url_2x": imgs["url_2x"], "url_4x": imgs["url_4x"]})
+                _ = db.set(
+                    name,
+                    {
+                        "url_1x": imgs["url_1x"],
+                        "url_2x": imgs["url_2x"],
+                        "url_4x": imgs["url_4x"],
+                    },
+                )
 
         print(f"Saved to {OUTPUT_FILE} ({len(seen)} unique emotes)")
 

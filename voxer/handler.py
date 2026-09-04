@@ -234,12 +234,14 @@ class MessageHandler:
         # Copy rather than move so the source sound file is preserved for reuse.
         # Runs in a thread — file I/O would otherwise block the event loop.
         await asyncio.to_thread(shutil.copy2, sound, mp3_path)
-        await self._broadcast(BroadcastEvent(
-            audio_url=f"/audio/{mp3_path.name}",
-            username=message.username,
-            avatar_url=message.avatar_url,
-            emotes=emotes,
-        ))
+        await self._broadcast(
+            BroadcastEvent(
+                audio_url=f"/audio/{mp3_path.name}",
+                username=message.username,
+                avatar_url=message.avatar_url,
+                emotes=emotes,
+            )
+        )
 
     async def _handle_user(self, message: QueuedMessage) -> None:
         """Process a regular chat message through the full normalisation pipeline.
@@ -312,7 +314,9 @@ class MessageHandler:
             msg: QueuedMessage = await self._message_queue.get()
             try:
                 LOGGER.debug(
-                    "Processing queued message from %s (%s)", msg.username, msg.kind.name
+                    "Processing queued message from %s (%s)",
+                    msg.username,
+                    msg.kind.name,
                 )
                 await self.handle(msg)
             except Exception:

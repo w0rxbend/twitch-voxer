@@ -54,16 +54,18 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 #   channel:read:subscriptions              — sub / resub / gift events
 #   bits:read                               — cheer events
 #   user:read:follows                       — fetch_emotes.py channel discovery
-OAUTH_SCOPES: Scopes = Scopes([
-    "user:read:chat",
-    "user:write:chat",
-    "user:bot",
-    "channel:bot",
-    "moderator:read:followers",
-    "channel:read:subscriptions",
-    "bits:read",
-    "user:read:follows",
-])
+OAUTH_SCOPES: Scopes = Scopes(
+    [
+        "user:read:chat",
+        "user:write:chat",
+        "user:bot",
+        "channel:bot",
+        "moderator:read:followers",
+        "channel:read:subscriptions",
+        "bits:read",
+        "user:read:follows",
+    ]
+)
 
 
 async def get_user_id(username: str) -> str:
@@ -125,7 +127,7 @@ class VoxBot(commands.AutoBot):
             client_secret=CLIENT_SECRET,
             bot_id=bot_id,
             owner_id=bot_id,
-            prefix="!",           # command prefix (no chat commands are defined yet)
+            prefix="!",  # command prefix (no chat commands are defined yet)
             subscriptions=subs,
             # Default scope set used by the /oauth route when no ?scopes= is given
             scopes=OAUTH_SCOPES,
@@ -209,7 +211,8 @@ class VoxBot(commands.AutoBot):
             except Exception as exc:
                 LOGGER.warning(
                     "Seed tokens are invalid or expired (%s) — "
-                    "falling back to browser authorization", exc
+                    "falling back to browser authorization",
+                    exc,
                 )
             else:
                 if resp.user_id == self.bot_id:
@@ -219,7 +222,9 @@ class VoxBot(commands.AutoBot):
                 LOGGER.warning(
                     "Seed tokens belong to %s (%s), not the bot account %s — "
                     "falling back to browser authorization",
-                    resp.login, resp.user_id, self.bot_id,
+                    resp.login,
+                    resp.user_id,
+                    self.bot_id,
                 )
 
         # The /oauth route always runs on the adapter.  With a public domain
@@ -357,7 +362,8 @@ class VoxBot(commands.AutoBot):
         except OSError:
             LOGGER.exception(
                 "Could not persist tokens to %s — authorization works for this "
-                "run but will be required again on the next start", config.TOKEN_FILE
+                "run but will be required again on the next start",
+                config.TOKEN_FILE,
             )
 
         await self.subscribe_for(payload.user_id)
@@ -411,7 +417,9 @@ class VoxBot(commands.AutoBot):
         failures = [e for e in resp.errors if e.error.status != 409]
         if duplicates:
             LOGGER.debug(
-                "%d subscription(s) already active for user %s", len(duplicates), user_id
+                "%d subscription(s) already active for user %s",
+                len(duplicates),
+                user_id,
             )
         if failures:
             LOGGER.warning(

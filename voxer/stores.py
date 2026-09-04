@@ -75,7 +75,9 @@ class VoiceStore:
             if voice not in self._voices:
                 if voice:
                     LOGGER.warning(
-                        "Voice %r for %s no longer exists — reassigning", voice, username
+                        "Voice %r for %s no longer exists — reassigning",
+                        voice,
+                        username,
                     )
                 voice = self.random_voice()
                 await self._db.set(username, voice)

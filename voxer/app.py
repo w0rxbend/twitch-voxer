@@ -26,10 +26,23 @@ from pathlib import Path
 
 from .bot import VoxBot, get_user_id
 from .config import (
-    ANNOUNCE_WINDOW_SECS, AUDIO_DIR, BOT_USERNAME, DB_PATH, EMOTE_SOUND_PATHS,
-    EMOTES_DB_PATH, MESSAGE_QUEUE_MAXSIZE, MESSAGES_PATH, NO_ANNOUNCE_USERS,
-    SCHEDULER_EMPTY_RETRY_DELAY, SCHEDULER_INITIAL_DELAY, SERVER_HOST,
-    SERVER_PORT, TIMESTAMPS_DB_PATH, TOKEN_FILE, VOICES_DIR, validate_config,
+    ANNOUNCE_WINDOW_SECS,
+    AUDIO_DIR,
+    BOT_USERNAME,
+    DB_PATH,
+    EMOTE_SOUND_PATHS,
+    EMOTES_DB_PATH,
+    MESSAGE_QUEUE_MAXSIZE,
+    MESSAGES_PATH,
+    NO_ANNOUNCE_USERS,
+    SCHEDULER_EMPTY_RETRY_DELAY,
+    SCHEDULER_INITIAL_DELAY,
+    SERVER_HOST,
+    SERVER_PORT,
+    TIMESTAMPS_DB_PATH,
+    TOKEN_FILE,
+    VOICES_DIR,
+    validate_config,
 )
 from .handler import MessageHandler
 from .log import setup_logging
@@ -133,9 +146,9 @@ async def run() -> None:
         async with asyncio.TaskGroup() as tg:
             # bot.start() logs in, loads TOKEN_FILE, brings up the OAuth web
             # adapter, and then serves EventSub until shutdown.
-            tg.create_task(bot.start())                   # Twitch EventSub WebSocket
-            tg.create_task(server.serve())                # Starlette HTTP + WebSocket server
-            tg.create_task(handler.process_queue())       # TTS synthesis loop
+            tg.create_task(bot.start())  # Twitch EventSub WebSocket
+            tg.create_task(server.serve())  # Starlette HTTP + WebSocket server
+            tg.create_task(handler.process_queue())  # TTS synthesis loop
 
             # Wait for login + adapter, then block until a user token exists
             # (stored, env-seeded, or granted through the browser flow).
@@ -148,7 +161,7 @@ async def run() -> None:
 
             # The scheduler posts to chat, which needs the user token — start
             # it only after authorization so it never 401s.
-            tg.create_task(scheduler.run())               # periodic chat message poster
+            tg.create_task(scheduler.run())  # periodic chat message poster
 
 
 def main() -> None:

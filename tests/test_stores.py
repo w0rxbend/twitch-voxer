@@ -50,7 +50,9 @@ class TestVoiceStore:
     async def test_missing_file_starts_empty(self, voice_store: VoiceStore) -> None:
         await voice_store.load()  # file does not exist yet — must not raise
 
-    async def test_concurrent_assignment_single_voice(self, voice_store: VoiceStore) -> None:
+    async def test_concurrent_assignment_single_voice(
+        self, voice_store: VoiceStore
+    ) -> None:
         await voice_store.load()
         voices = await asyncio.gather(
             *(voice_store.get_or_assign("dave") for _ in range(10))
@@ -64,7 +66,9 @@ class TestAnnounceTracker:
         await tracker.load()
         assert await tracker.claim("alice") is True
 
-    async def test_second_message_within_window_does_not_claim(self, tmp_path: Path) -> None:
+    async def test_second_message_within_window_does_not_claim(
+        self, tmp_path: Path
+    ) -> None:
         tracker = AnnounceTracker(str(tmp_path / "ts.json"), window_secs=300)
         await tracker.load()
         assert await tracker.claim("alice") is True

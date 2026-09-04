@@ -26,15 +26,15 @@ load_dotenv()
 # These belong to the *bot* Twitch account's application (dev.twitch.tv console).
 # They are the ONLY required settings: user tokens are obtained interactively
 # via the browser OAuth flow on first startup and persisted to TOKEN_FILE.
-CLIENT_ID: str     = os.getenv("TWITCH_CLIENT_ID", "")
+CLIENT_ID: str = os.getenv("TWITCH_CLIENT_ID", "")
 CLIENT_SECRET: str = os.getenv("TWITCH_CLIENT_SECRET", "")
 # Optional seed tokens: when set AND no token file exists yet, they are added
 # to the token store on startup so the browser flow can be skipped entirely
 # (useful for restoring a deployment from a known-good token pair).
-ACCESS_TOKEN: str  = os.getenv("TWITCH_ACCESS_TOKEN", "")
+ACCESS_TOKEN: str = os.getenv("TWITCH_ACCESS_TOKEN", "")
 REFRESH_TOKEN: str = os.getenv("TWITCH_REFRESH_TOKEN", "")
 # Login name (slug) of the bot Twitch account, used to look up its numeric ID.
-BOT_USERNAME: str  = str(os.getenv("TWITCH_BOT_USERNAME", "worxbend"))
+BOT_USERNAME: str = str(os.getenv("TWITCH_BOT_USERNAME", "worxbend"))
 
 # Names of the environment variables that must be non-empty for the bot to run.
 _REQUIRED_VARS: tuple[str, ...] = (
@@ -45,13 +45,15 @@ _REQUIRED_VARS: tuple[str, ...] = (
 # ── Storage paths ─────────────────────────────────────────────────────────────
 # pickledb files are JSON under the hood; paths are relative to the working dir
 # unless overridden (Docker sets them to /data/…).
-DB_PATH: str            = str(os.getenv("VOXER_DB_PATH", "data/voices.json"))
-AUDIO_DIR: str          = str(os.getenv("VOXER_AUDIO_DIR", "audio"))
-EMOTES_DB_PATH: str     = str(os.getenv("VOXER_EMOTES_DB_PATH", "emotes/emotes.db"))
-TIMESTAMPS_DB_PATH: str = str(os.getenv("VOXER_TIMESTAMPS_DB_PATH", "data/timestamps.json"))
-MESSAGES_PATH: str      = str(os.getenv("VOXER_MESSAGES_PATH", "data/messages.json"))
+DB_PATH: str = str(os.getenv("VOXER_DB_PATH", "data/voices.json"))
+AUDIO_DIR: str = str(os.getenv("VOXER_AUDIO_DIR", "audio"))
+EMOTES_DB_PATH: str = str(os.getenv("VOXER_EMOTES_DB_PATH", "emotes/emotes.db"))
+TIMESTAMPS_DB_PATH: str = str(
+    os.getenv("VOXER_TIMESTAMPS_DB_PATH", "data/timestamps.json")
+)
+MESSAGES_PATH: str = str(os.getenv("VOXER_MESSAGES_PATH", "data/messages.json"))
 # Directory of custom voice JSON files (*.json) loaded by TTSService at startup.
-VOICES_DIR: str         = str(os.getenv("VOXER_VOICES_DIR", "voices"))
+VOICES_DIR: str = str(os.getenv("VOXER_VOICES_DIR", "voices"))
 
 # ── HTTP / WebSocket server ───────────────────────────────────────────────────
 SERVER_HOST: str = str(os.getenv("VOXER_SERVER_HOST", "0.0.0.0"))
@@ -69,9 +71,10 @@ OAUTH_PORT: int = int(os.getenv("VOXER_OAUTH_PORT", "4343"))
 # Twitch dev console.  Default: http://localhost:<OAUTH_PORT>/oauth/callback.
 # Override for a reverse-proxy setup, e.g. https://bot.example.org/oauth/callback
 # (a non-localhost host implies HTTPS, which Twitch requires anyway).
-OAUTH_REDIRECT_URL: str = str(
-    os.getenv("VOXER_OAUTH_REDIRECT_URL", "")
-) or f"http://localhost:{OAUTH_PORT}/oauth/callback"
+OAUTH_REDIRECT_URL: str = (
+    str(os.getenv("VOXER_OAUTH_REDIRECT_URL", ""))
+    or f"http://localhost:{OAUTH_PORT}/oauth/callback"
+)
 # Where user access/refresh tokens are persisted between runs (twitchio JSON
 # format).  Lives under the data dir so Docker keeps it in the /data volume.
 TOKEN_FILE: str = str(os.getenv("VOXER_TOKEN_FILE", "data/tokens.json"))

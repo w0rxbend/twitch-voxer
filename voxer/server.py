@@ -74,7 +74,9 @@ class AudioServer:
             # Full-featured OBS overlay with 3D speaker animation and emote display
             return FileResponse(
                 _STATIC_DIR / "index.html",
-                headers={"Cache-Control": "no-store"},  # prevent OBS from caching stale JS
+                headers={
+                    "Cache-Control": "no-store"
+                },  # prevent OBS from caching stale JS
             )
 
         async def simple(request: Request) -> FileResponse:
@@ -97,7 +99,9 @@ class AudioServer:
             """
             await websocket.accept()
             self._clients.add(websocket)
-            LOGGER.info("WebSocket client connected — %d client(s) active", len(self._clients))
+            LOGGER.info(
+                "WebSocket client connected — %d client(s) active", len(self._clients)
+            )
             try:
                 while True:
                     data = await websocket.receive_text()
@@ -121,21 +125,26 @@ class AudioServer:
                         else:
                             LOGGER.warning("Rejected suspicious filename: %r", filename)
             except WebSocketDisconnect:
-                LOGGER.info("WebSocket client disconnected — %d client(s) remaining", len(self._clients) - 1)
+                LOGGER.info(
+                    "WebSocket client disconnected — %d client(s) remaining",
+                    len(self._clients) - 1,
+                )
             finally:
                 # Always remove the socket from the active set on any disconnect or error
                 self._clients.discard(websocket)
 
-        return Starlette(routes=[
-            Route("/", index),
-            Route("/simple", simple),
-            Route("/favicon.ico", favicon),
-            WebSocketRoute("/ws", ws_endpoint),
-            # Static files (JS, CSS, GLB model) served from voxer/static/
-            Mount("/static", StaticFiles(directory=_STATIC_DIR)),
-            # Ephemeral MP3 files served directly from audio_dir
-            Mount("/audio", StaticFiles(directory=self._audio_dir)),
-        ])
+        return Starlette(
+            routes=[
+                Route("/", index),
+                Route("/simple", simple),
+                Route("/favicon.ico", favicon),
+                WebSocketRoute("/ws", ws_endpoint),
+                # Static files (JS, CSS, GLB model) served from voxer/static/
+                Mount("/static", StaticFiles(directory=_STATIC_DIR)),
+                # Ephemeral MP3 files served directly from audio_dir
+                Mount("/audio", StaticFiles(directory=self._audio_dir)),
+            ]
+        )
 
     async def broadcast(self, event: BroadcastEvent) -> None:
         """Send an audio event to all connected WebSocket clients.
@@ -150,7 +159,9 @@ class AudioServer:
         if not self._clients:
             LOGGER.debug("No WS clients connected, skipping broadcast")
             return
-        LOGGER.info("Broadcasting to %d client(s): %s", len(self._clients), event.audio_url)
+        LOGGER.info(
+            "Broadcasting to %d client(s): %s", len(self._clients), event.audio_url
+        )
         # dataclasses.asdict() recursively converts nested dataclasses (e.g. EmoteItem)
         message = json.dumps(dataclasses.asdict(event))
         dead: set[WebSocket] = set()

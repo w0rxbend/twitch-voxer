@@ -60,7 +60,9 @@ class Scheduler:
             return ScheduledMessage(raw, DEFAULT_FREQUENCY_PER_HOUR)
 
         if not isinstance(raw, dict):
-            LOGGER.warning("Skipping scheduled message %d: expected string or object", index)
+            LOGGER.warning(
+                "Skipping scheduled message %d: expected string or object", index
+            )
             return None
 
         text = raw.get("text")
@@ -71,7 +73,7 @@ class Scheduler:
         frequency = raw.get("frequency_per_hour", DEFAULT_FREQUENCY_PER_HOUR)
         try:
             frequency_per_hour = float(frequency)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             LOGGER.warning(
                 "Skipping scheduled message %d: invalid frequency_per_hour=%r",
                 index,
@@ -126,7 +128,9 @@ class Scheduler:
         return random.choices(messages, weights=weights, k=1)[0]
 
     def _delay_for(self, messages: list[ScheduledMessage]) -> float:
-        total_frequency_per_hour = sum(message.frequency_per_hour for message in messages)
+        total_frequency_per_hour = sum(
+            message.frequency_per_hour for message in messages
+        )
         if total_frequency_per_hour <= 0:
             return float(self._empty_retry_delay)
         return SECONDS_PER_HOUR / total_frequency_per_hour

@@ -25,20 +25,22 @@ DEFAULT_LANG: str = "uk"
 
 # Well-known Twitch bot accounts that should never be read aloud.
 # Any username that *contains* "bot" (case-insensitive) is also silently skipped.
-KNOWN_BOTS: frozenset[str] = frozenset({
-    "streamelements",
-    "nightbot",
-    "moobot",
-    "streamlabs",
-    "wizebot",
-    "fossabot",
-    "botisimo",
-    "phantombot",
-    "cloudbot",
-    "sery_bot",
-    "soundalerts",
-    "dixperstats",
-})
+KNOWN_BOTS: frozenset[str] = frozenset(
+    {
+        "streamelements",
+        "nightbot",
+        "moobot",
+        "streamlabs",
+        "wizebot",
+        "fossabot",
+        "botisimo",
+        "phantombot",
+        "cloudbot",
+        "sery_bot",
+        "soundalerts",
+        "dixperstats",
+    }
+)
 
 # ── i18n announcement templates ───────────────────────────────────────────────
 
@@ -229,9 +231,7 @@ def emoji_url(char: str) -> str:
     are actually named in the Twemoji repository.
     """
     has_zwj = "‍" in char
-    codepoints = "-".join(
-        f"{ord(c):x}" for c in char if has_zwj or ord(c) != 0xFE0F
-    )
+    codepoints = "-".join(f"{ord(c):x}" for c in char if has_zwj or ord(c) != 0xFE0F)
     return f"{_TWEMOJI_BASE}/{codepoints}.png"
 
 

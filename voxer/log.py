@@ -30,17 +30,17 @@ def setup_logging() -> None:
         "%(cyan)s%(name)-30s%(reset)s %(message)s",
         datefmt="%H:%M:%S",
         log_colors={
-            "DEBUG":    "cyan",
-            "INFO":     "green",
-            "WARNING":  "yellow",
-            "ERROR":    "red",
+            "DEBUG": "cyan",
+            "INFO": "green",
+            "WARNING": "yellow",
+            "ERROR": "red",
             "CRITICAL": "bold_red",
         },
         secondary_log_colors={
             # Also colour the message text itself for WARNING and above
             "message": {
-                "WARNING":  "yellow",
-                "ERROR":    "red",
+                "WARNING": "yellow",
+                "ERROR": "red",
                 "CRITICAL": "bold_red",
             },
         },

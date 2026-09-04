@@ -27,7 +27,10 @@ class TestParseMessage:
         assert msg == ScheduledMessage("follow me", 2.5)
 
     def test_missing_text_rejected(self, tmp_path: Path) -> None:
-        assert make_scheduler(tmp_path)._parse_message({"frequency_per_hour": 1}, 1) is None
+        assert (
+            make_scheduler(tmp_path)._parse_message({"frequency_per_hour": 1}, 1)
+            is None
+        )
 
     def test_blank_text_rejected(self, tmp_path: Path) -> None:
         assert make_scheduler(tmp_path)._parse_message({"text": "   "}, 1) is None

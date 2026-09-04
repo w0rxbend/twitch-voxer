@@ -83,7 +83,9 @@ class TTSService:
         """Return the cached style object for voice_name, loading it on first access."""
         if voice_name not in self._voice_cache:
             LOGGER.debug("Loading voice style: %s", voice_name)
-            self._voice_cache[voice_name] = self._tts.get_voice_style(voice_name=voice_name)
+            self._voice_cache[voice_name] = self._tts.get_voice_style(
+                voice_name=voice_name
+            )
         return self._voice_cache[voice_name]
 
     def save_wav(self, text: str, *, voice_name: str, lang: str) -> Path:
@@ -104,7 +106,9 @@ class TTSService:
             Path to the generated temporary WAV file.
         """
         LOGGER.debug("Synthesising [%s/%s]: %r", voice_name, lang, text)
-        wav, _ = self._tts.synthesize(text, voice_style=self._voice_style(voice_name), lang=lang)
+        wav, _ = self._tts.synthesize(
+            text, voice_style=self._voice_style(voice_name), lang=lang
+        )
         # Use a named temp file with delete=False so we can return the path;
         # the caller is responsible for cleanup.
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -135,7 +139,11 @@ class TTSService:
         """
         LOGGER.debug("Converting to MP3: %s", mp3_path.name)
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", str(wav_path), str(mp3_path),
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(wav_path),
+            str(mp3_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

@@ -76,6 +76,7 @@ _CHEER_ANONYMOUS = [
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def follow_message(username: str) -> str:
     """Return a random funny follow announcement (Ukrainian)."""
     return random.choice(_FOLLOW).format(username=username)
