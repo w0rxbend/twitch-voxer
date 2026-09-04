@@ -7,7 +7,9 @@ creates objects and connects them.
 Startup order matters:
   1. Logging must be configured before anything else logs.
   2. TTSService downloads the model on first run, so it starts early.
-  3. MessageHandler.preload_resources() must complete before messages arrive (loads emote DB).
+  3. The three pickledb-backed stores are loaded before the handler starts
+     draining the queue, so the first message already sees emote images and
+     remembered voice assignments.
   4. bot_id is fetched before the bot socket opens so subscriptions can reference it.
   5. An asyncio.TaskGroup starts the long-running coroutines; the scheduler is
      added only after ensure_authorized() so it never posts to chat without a
@@ -88,6 +90,33 @@ def _prepare_runtime_dirs(audio_dir: Path, token_file: Path) -> None:
     token_file.parent.mkdir(parents=True, exist_ok=True)
 
 
+async def _authorize_and_subscribe(bot: VoxBot, bot_id: str) -> None:
+    """Take a freshly started bot all the way to "allowed to act on the channel".
+
+    Three awaits that only make sense in this order, which is why they live
+    together in one named function rather than as loose statements in the middle
+    of the task group:
+
+      1. ``wait_until_ready()`` — the bot has logged in and its OAuth web
+         adapter is accepting requests.  Nothing below can happen before that.
+      2. ``ensure_authorized()`` — block until a *user* token exists.  It is
+         loaded from TOKEN_FILE, or seeded from the environment, or, on a first
+         run, obtained by opening the browser for the one-time grant, which
+         means this await can sit here for as long as it takes a human to click
+         "Authorize".
+      3. ``subscribe_for(bot_id)`` — register the EventSub subscriptions for the
+         bot's own channel.  Conduit subscriptions expire after 72 hours of
+         downtime, so this runs on every boot; re-registering something that is
+         still alive is tolerated by Twitch and costs nothing.
+
+    Returning from this function is the signal the caller waits for before
+    starting anything that talks to chat.
+    """
+    await bot.wait_until_ready()
+    await bot.ensure_authorized()
+    await bot.subscribe_for(bot_id)
+
+
 async def run() -> None:
     """Initialize and start the Twitch TTS bot with all components.
 
@@ -142,6 +171,19 @@ async def run() -> None:
     announce_tracker = AnnounceTracker(TIMESTAMPS_DB_PATH, ANNOUNCE_WINDOW_SECS)
     emote_store = EmoteStore(EMOTES_DB_PATH)
 
+    # Reading a pickledb file is I/O, so it has to be awaited, and `async def
+    # __init__` is not valid Python — a store cannot fill itself in its own
+    # constructor.  The loads therefore happen here, right under the lines that
+    # created the objects: whatever builds a component is what starts it.  They
+    # must finish before the handler begins draining the queue, and it is easier
+    # to see that they do when both facts are on the same screen.
+    # Each store tolerates a missing or unreadable file on its own, so a failure
+    # here costs a feature — no emote images, forgotten voice assignments —
+    # rather than aborting startup.
+    await emote_store.load()
+    await voice_store.load()
+    await announce_tracker.load()
+
     # MessageHandler is the core business logic layer.  server.broadcast is
     # passed in so the handler never imports the server directly (loose coupling).
     handler = MessageHandler(
@@ -155,9 +197,6 @@ async def run() -> None:
         emote_sound_paths=EMOTE_SOUND_PATHS,
         no_announce_users=NO_ANNOUNCE_USERS,
     )
-    # preload_resources() exists because `async def __init__` is not valid Python.
-    # It loads the three pickledb-backed stores, which requires awaiting I/O.
-    await handler.preload_resources()
 
     # Resolve the numeric Twitch user ID for the bot account.  Only needs the
     # app credentials, so it works before any user token exists.
@@ -259,14 +298,8 @@ async def run() -> None:
                     )
                 )
 
-                # Wait for login + adapter, then block until a user token exists
-                # (stored, env-seeded, or granted through the browser flow).
-                await bot.wait_until_ready()
-                await bot.ensure_authorized()
-
-                # Conduit subscriptions expire after 72h of downtime — re-register
-                # the bot's own channel on every boot (duplicates are tolerated).
-                await bot.subscribe_for(bot_id)
+                # Log in, get a user token, register the channel subscriptions.
+                await _authorize_and_subscribe(bot, bot_id)
 
                 # The scheduler posts to chat, which needs the user token — start
                 # it only after authorization so it never 401s.

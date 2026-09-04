@@ -107,8 +107,8 @@ async def _seeded_emote_store(
     pickledb's methods are "dual" sync/async and hand back a coroutine whenever
     a loop is running, so calling them without await would write nothing at all
     and leave every assertion passing against an empty cache.  The store itself
-    is returned unloaded on purpose — MessageHandler.preload_resources() is what
-    loads it in production, and the caller invokes that.
+    is returned unloaded on purpose — in the running bot the composition root is
+    what loads it, and build_handler below does the same.
     """
     if emotes is None:
         return EmoteStore(None)
@@ -162,21 +162,33 @@ def build_handler(
                 raise broadcast_raises("broadcast failed")
             return delivered
 
-        instance = MessageHandler(
+        voice_store = VoiceStore(str(tmp_path / "voices.json"), ["M1"])
+        announce_tracker = AnnounceTracker(
+            str(tmp_path / "ts.json"), announce_window_secs
+        )
+        emote_store = await _seeded_emote_store(tmp_path, emotes)
+        # Reading each store's file is awaited I/O, so it cannot happen in a
+        # constructor.  Whoever builds the stores loads them: in the running bot
+        # that is voxer.app.run(), and here it is this factory.  Loading them in
+        # the same order and at the same point the composition root does means
+        # the handler these tests drive starts in the state it starts in for
+        # real — in particular with the seeded emote cache already in memory,
+        # which is what makes emote lookups resolve.
+        await emote_store.load()
+        await voice_store.load()
+        await announce_tracker.load()
+
+        return MessageHandler(
             tts=fake_tts,
-            voice_store=VoiceStore(str(tmp_path / "voices.json"), ["M1"]),
-            announce_tracker=AnnounceTracker(
-                str(tmp_path / "ts.json"), announce_window_secs
-            ),
-            emote_store=await _seeded_emote_store(tmp_path, emotes),
+            voice_store=voice_store,
+            announce_tracker=announce_tracker,
+            emote_store=emote_store,
             audio_dir=audio_dir,
             broadcast=capture,
             message_queue=None,  # handle() is called directly; the queue is unused
             emote_sound_paths=emote_sound_paths,
             no_announce_users=no_announce_users,
         )
-        await instance.preload_resources()
-        return instance
 
     return _build
 

@@ -57,12 +57,18 @@ LOGGER: logging.Logger = logging.getLogger(__name__)
 class MessageHandler:
     """Orchestrates the full message-to-audio pipeline.
 
-    Owns:
+    Every collaborator is handed in by the composition root; this class creates
+    none of them and manages the lifecycle of none of them:
       - VoiceStore for persistent voice assignment
       - AnnounceTracker for announce-window bookkeeping
       - EmoteStore for emote name → image URL lookups
-      - reference to TTSService for synthesis
-      - reference to server.broadcast for WebSocket delivery
+      - TTSService for synthesis
+      - server.broadcast for WebSocket delivery
+
+    The three stores arrive already loaded, and are read from memory for the
+    rest of the process's life rather than re-read per message: this process is
+    their sole reader and writer, so a reload on the hot path would be disk I/O
+    that can never return anything new.
     """
 
     def __init__(
@@ -117,22 +123,6 @@ class MessageHandler:
             user.lower() for user in (no_announce_users or ())
         )
         LOGGER.info("MessageHandler ready")
-
-    async def preload_resources(self) -> None:
-        """Load the three stores, which need I/O that cannot be awaited in __init__.
-
-        Called once by the composition root before the message queue starts
-        draining.  Each store tolerates a missing or broken file on its own, so
-        a failure here degrades a feature (no emote images, forgotten voice
-        assignments) rather than aborting startup.
-
-        The stores are loaded once here rather than re-read on every message:
-        this process is their sole reader and writer, so per-message reloads
-        were pure disk I/O waste on the hot path.
-        """
-        await self._emote_store.load()
-        await self._voice_store.load()
-        await self._announce_tracker.load()
 
     async def _detect_lang(self, text: str) -> str:
         """Detect the language of text, returning "uk" or "en".
