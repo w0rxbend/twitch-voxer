@@ -17,7 +17,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # "uv" is the package manager this project uses locally. Installing it
       # here means CI resolves dependencies from uv.lock, the exact versions
