@@ -9,8 +9,9 @@ that lists ALL missing variables at once.  Deferring the check keeps
 `import voxer.handler` (e.g. in tests) from requiring real credentials.
 Optional variables fall back to sensible defaults.
 
-The module is laid out as one contiguous block of constants followed by the
-validation functions, so every reference inside a function points backwards.
+The module is laid out as the small parse helpers, then one contiguous block
+of constants, then the validation functions, so every reference inside a
+function points backwards.
 """
 
 import os
@@ -21,6 +22,61 @@ from dotenv import load_dotenv
 # Load .env into os.environ before any constant below reads from it.
 # Has no effect if the file does not exist (harmless in Docker/CI).
 load_dotenv()
+
+
+# ── Parse helpers ─────────────────────────────────────────────────────────────
+# Defined above the constants because every numeric and list setting below is
+# built by calling one of them while this module is being imported.
+
+
+def _env_int(
+    name: str,
+    default: str,
+    *,
+    minimum: int = 1,
+    maximum: int | None = None,
+) -> int:
+    """Read an environment variable as a whole number, or fail saying which one.
+
+    Written the direct way, `int(os.getenv("VOXER_SERVER_PORT", "8080"))`
+    reports a typo as `ValueError: invalid literal for int() with base 10:
+    'eighty'`, raised from an `import` statement.  That message names neither
+    the setting nor the file it came from, so whoever mistyped it in .env has
+    to work out which of the six numeric settings is at fault.  Here the
+    RuntimeError names the variable and echoes the value.
+
+    `minimum` (and, for ports, `maximum`) reject numbers that parse fine but
+    cannot work.  The default minimum of 1 suits every setting here except the
+    scheduler's initial delay, where 0 legitimately means "post immediately".
+    A value of 0 is otherwise never harmless: asyncio.Queue treats maxsize=0
+    as *unbounded*, so accepting it would silently remove the backpressure the
+    queue exists to provide, and port 0 asks the operating system for an
+    arbitrary free port that nothing else could then connect to.
+    """
+    raw = os.getenv(name, default)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be a whole number, got {raw!r}") from None
+    if value < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}, got {value}")
+    if maximum is not None and value > maximum:
+        raise RuntimeError(f"{name} must be at most {maximum}, got {value}")
+    return value
+
+
+def _env_csv(name: str, default: str) -> list[str]:
+    """Read a comma-separated environment variable as a list of trimmed items.
+
+    Surrounding whitespace is stripped from each item and empty items are
+    dropped, so a trailing comma or `a, b` rather than `a,b` does not produce
+    an entry that matches nothing.  Case is left alone: only one caller wants
+    case-insensitive matching, and it lowercases at its own call site.
+    """
+    return [
+        item.strip() for item in os.getenv(name, default).split(",") if item.strip()
+    ]
+
 
 # ── Twitch API credentials ────────────────────────────────────────────────────
 # These belong to the *bot* Twitch account's application (dev.twitch.tv console).
@@ -34,7 +90,7 @@ CLIENT_SECRET: str = os.getenv("TWITCH_CLIENT_SECRET", "")
 ACCESS_TOKEN: str = os.getenv("TWITCH_ACCESS_TOKEN", "")
 REFRESH_TOKEN: str = os.getenv("TWITCH_REFRESH_TOKEN", "")
 # Login name (slug) of the bot Twitch account, used to look up its numeric ID.
-BOT_USERNAME: str = str(os.getenv("TWITCH_BOT_USERNAME", "worxbend"))
+BOT_USERNAME: str = os.getenv("TWITCH_BOT_USERNAME", "worxbend")
 
 # Names of the environment variables that must be non-empty for the bot to run.
 _REQUIRED_VARS: tuple[str, ...] = (
@@ -45,19 +101,17 @@ _REQUIRED_VARS: tuple[str, ...] = (
 # ── Storage paths ─────────────────────────────────────────────────────────────
 # pickledb files are JSON under the hood; paths are relative to the working dir
 # unless overridden (Docker sets them to /data/…).
-DB_PATH: str = str(os.getenv("VOXER_DB_PATH", "data/voices.json"))
-AUDIO_DIR: str = str(os.getenv("VOXER_AUDIO_DIR", "audio"))
-EMOTES_DB_PATH: str = str(os.getenv("VOXER_EMOTES_DB_PATH", "emotes/emotes.db"))
-TIMESTAMPS_DB_PATH: str = str(
-    os.getenv("VOXER_TIMESTAMPS_DB_PATH", "data/timestamps.json")
-)
-MESSAGES_PATH: str = str(os.getenv("VOXER_MESSAGES_PATH", "data/messages.json"))
+DB_PATH: str = os.getenv("VOXER_DB_PATH", "data/voices.json")
+AUDIO_DIR: str = os.getenv("VOXER_AUDIO_DIR", "audio")
+EMOTES_DB_PATH: str = os.getenv("VOXER_EMOTES_DB_PATH", "emotes/emotes.db")
+TIMESTAMPS_DB_PATH: str = os.getenv("VOXER_TIMESTAMPS_DB_PATH", "data/timestamps.json")
+MESSAGES_PATH: str = os.getenv("VOXER_MESSAGES_PATH", "data/messages.json")
 # Directory of custom voice JSON files (*.json) loaded by TTSService at startup.
-VOICES_DIR: str = str(os.getenv("VOXER_VOICES_DIR", "voices"))
+VOICES_DIR: str = os.getenv("VOXER_VOICES_DIR", "voices")
 
 # ── HTTP / WebSocket server ───────────────────────────────────────────────────
-SERVER_HOST: str = str(os.getenv("VOXER_SERVER_HOST", "0.0.0.0"))
-SERVER_PORT: int = int(os.getenv("VOXER_SERVER_PORT", "8080"))
+SERVER_HOST: str = os.getenv("VOXER_SERVER_HOST", "0.0.0.0")
+SERVER_PORT: int = _env_int("VOXER_SERVER_PORT", "8080", maximum=65535)
 
 # ── OAuth / token persistence ─────────────────────────────────────────────────
 # twitchio's built-in web adapter serves the OAuth flow:
@@ -65,33 +119,33 @@ SERVER_PORT: int = int(os.getenv("VOXER_SERVER_PORT", "8080"))
 #   http://localhost:<OAUTH_PORT>/oauth/callback — must be registered as an OAuth
 #                                                  Redirect URL in the Twitch dev console
 # In Docker the bind host must be 0.0.0.0 so the published port is reachable.
-OAUTH_HOST: str = str(os.getenv("VOXER_OAUTH_HOST", "localhost"))
-OAUTH_PORT: int = int(os.getenv("VOXER_OAUTH_PORT", "4343"))
+OAUTH_HOST: str = os.getenv("VOXER_OAUTH_HOST", "localhost")
+OAUTH_PORT: int = _env_int("VOXER_OAUTH_PORT", "4343", maximum=65535)
 # Full OAuth redirect URL — the URL registered as "OAuth Redirect URL" in the
 # Twitch dev console.  Default: http://localhost:<OAUTH_PORT>/oauth/callback.
 # Override for a reverse-proxy setup, e.g. https://bot.example.org/oauth/callback
 # (a non-localhost host implies HTTPS, which Twitch requires anyway).
 OAUTH_REDIRECT_URL: str = (
-    str(os.getenv("VOXER_OAUTH_REDIRECT_URL", ""))
+    os.getenv("VOXER_OAUTH_REDIRECT_URL", "")
     or f"http://localhost:{OAUTH_PORT}/oauth/callback"
 )
 # Where user access/refresh tokens are persisted between runs (twitchio JSON
 # format).  Lives under the data dir so Docker keeps it in the /data volume.
-TOKEN_FILE: str = str(os.getenv("VOXER_TOKEN_FILE", "data/tokens.json"))
+TOKEN_FILE: str = os.getenv("VOXER_TOKEN_FILE", "data/tokens.json")
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 # How long to wait before sending the first scheduled message (lets the bot
 # finish its EventSub handshake before posting to chat).
-SCHEDULER_INITIAL_DELAY: int = int(os.getenv("VOXER_SCHEDULER_INITIAL_DELAY", "10"))
+SCHEDULER_INITIAL_DELAY: int = _env_int(
+    "VOXER_SCHEDULER_INITIAL_DELAY", "10", minimum=0
+)
 # How long to wait before re-checking when the message list is empty or invalid.
 # The normal posting cadence is NOT this value — it is derived from each
 # message's frequency_per_hour in data/messages.json.
 # VOXER_SCHEDULER_INTERVAL is accepted as a deprecated alias of the new name.
-SCHEDULER_EMPTY_RETRY_DELAY: int = int(
-    os.getenv(
-        "VOXER_SCHEDULER_EMPTY_RETRY_DELAY",
-        os.getenv("VOXER_SCHEDULER_INTERVAL", "600"),
-    )
+SCHEDULER_EMPTY_RETRY_DELAY: int = _env_int(
+    "VOXER_SCHEDULER_EMPTY_RETRY_DELAY",
+    os.getenv("VOXER_SCHEDULER_INTERVAL", "600"),
 )
 
 # ── Message queue ─────────────────────────────────────────────────────────────
@@ -101,35 +155,32 @@ SCHEDULER_EMPTY_RETRY_DELAY: int = int(
 # full, new *chat* messages are dropped (a line read out a minute late is worth
 # nothing); channel events wait for room instead, because they are rare and
 # losing a raid alert is worse than a short delay.
-MESSAGE_QUEUE_MAXSIZE: int = int(os.getenv("VOXER_MESSAGE_QUEUE_MAXSIZE", "20"))
+# 0 is rejected rather than treated as "no limit": asyncio.Queue reads maxsize=0
+# as unbounded, which would turn the paragraph above into a comment describing
+# something the code no longer does.
+MESSAGE_QUEUE_MAXSIZE: int = _env_int("VOXER_MESSAGE_QUEUE_MAXSIZE", "20")
 
 # ── Announcement behaviour ────────────────────────────────────────────────────
 # Time window (seconds) during which a user's name is NOT re-announced.
 # After this window elapses, the next message prepends "username says:".
-ANNOUNCE_WINDOW_SECS: int = int(os.getenv("VOXER_ANNOUNCE_WINDOW_SECS", "300"))
+ANNOUNCE_WINDOW_SECS: int = _env_int("VOXER_ANNOUNCE_WINDOW_SECS", "300")
 
 # Usernames that never receive the "username says:" prefix (e.g. the bot itself).
 # Comma-separated list; comparison is case-insensitive.
 # Defaults to the bot's own login to avoid self-announcement loops.
 NO_ANNOUNCE_USERS: frozenset[str] = frozenset(
-    u.strip().lower()
-    for u in os.getenv("VOXER_NO_ANNOUNCE_USERS", BOT_USERNAME).split(",")
-    if u.strip()
+    user.lower() for user in _env_csv("VOXER_NO_ANNOUNCE_USERS", BOT_USERNAME)
 )
 
 # Comma-separated list of MP3 files played for emote-only messages.
 # Each file is picked at random; falls back to silence if the list is empty.
-EMOTE_SOUND_PATHS: list[str] = [
-    p.strip()
-    for p in os.getenv(
-        "VOXER_EMOTE_SOUND_PATHS",
-        "emotes/slack-message.mp3,emotes/discord.mp3",
-    ).split(",")
-    if p.strip()
-]
+EMOTE_SOUND_PATHS: list[str] = _env_csv(
+    "VOXER_EMOTE_SOUND_PATHS",
+    "emotes/slack-message.mp3,emotes/discord.mp3",
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-LOG_LEVEL: str = str(os.getenv("VOXER_LOG_LEVEL", "INFO")).upper()
+LOG_LEVEL: str = os.getenv("VOXER_LOG_LEVEL", "INFO").upper()
 
 
 # ── Startup validation ────────────────────────────────────────────────────────
