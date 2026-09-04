@@ -1,0 +1,51 @@
+# Runs the same four checks a contributor is expected to run locally, so a pull
+# request never has to be trusted on "it works on my machine".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch cancels the run still in flight for it,
+# because only the newest commit's result is worth waiting for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # "uv" is the package manager this project uses locally. Installing it
+      # here means CI resolves dependencies from uv.lock, the exact versions
+      # a developer gets, rather than whatever pip would pick today.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # ".python-version" pins 3.14; this installs that interpreter.
+      - name: Install Python
+        run: uv python install
+
+      # "--dev" also installs the [dependency-groups] dev tools (ruff, pyright,
+      # pytest), which the checks below need.
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Lint
+        run: uv run ruff check
+
+      # "--check" reports formatting differences instead of rewriting files,
+      # which is what you want on a machine with no one to review the rewrite.
+      - name: Check formatting
+        run: uv run ruff format --check
+
+      - name: Type-check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest -q
