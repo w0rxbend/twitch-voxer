@@ -14,11 +14,12 @@ the pipeline have to be faked or the tests would be slow and flaky:
 
 from pathlib import Path
 
+import pickledb
 import pytest
 
 from voxer import handler as handler_module
 from voxer.handler import MessageHandler
-from voxer.models import BroadcastEvent, MessageKind, QueuedMessage
+from voxer.models import BroadcastEvent, EmoteItem, MessageKind, QueuedMessage
 from voxer.stores import AnnounceTracker, EmoteStore, VoiceStore
 
 
@@ -74,6 +75,37 @@ def fixed_language(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(handler_module, "detect", lambda text: "en")
 
 
+async def _seeded_emote_store(
+    tmp_path: Path, emotes: dict[str, dict[str, str]] | None
+) -> EmoteStore:
+    """Build an EmoteStore over a real cache file holding `emotes`.
+
+    With `emotes` unset the store is created with db_path=None, which is how the
+    app switches emote images off entirely — the store then stays empty.
+
+    Otherwise a genuine pickledb file is written under tmp_path, one entry per
+    emote, in the same shape voxer/fetch_emotes.py produces:
+    {"Kappa": {"url_1x": ..., "url_2x": ..., "url_4x": ...}}.  Writing a real
+    file rather than reaching into EmoteStore's private dict means the test
+    exercises the loading code the running bot actually uses.
+
+    The writes are awaited because this helper runs inside an event loop:
+    pickledb's methods are "dual" sync/async and hand back a coroutine whenever
+    a loop is running, so calling them without await would write nothing at all
+    and leave every assertion passing against an empty cache.  The store itself
+    is returned unloaded on purpose — MessageHandler.preload_resources() is what
+    loads it in production, and the caller invokes that.
+    """
+    if emotes is None:
+        return EmoteStore(None)
+    path = tmp_path / "emotes.db"
+    db = pickledb.PickleDB(str(path))
+    for name, urls in emotes.items():
+        await db.set(name, urls)
+    await db.save()
+    return EmoteStore(str(path))
+
+
 @pytest.fixture
 def build_handler(
     tmp_path: Path,
@@ -86,6 +118,10 @@ def build_handler(
     The stores are real and backed by tmp_path — they are cheap, and using the
     real ones means the announce-window behaviour is exercised rather than
     re-implemented in a stub.
+
+    Pass `emotes` to give the handler a populated Twitch emote cache; leaving it
+    unset keeps the store permanently empty, which is what every test that does
+    not care about emote images wants.
     """
 
     async def _build(
@@ -93,6 +129,7 @@ def build_handler(
         emote_sound_paths: list[str] | None = None,
         no_announce_users: frozenset[str] | None = None,
         announce_window_secs: int = 300,
+        emotes: dict[str, dict[str, str]] | None = None,
     ) -> MessageHandler:
         async def capture(event: BroadcastEvent) -> None:
             broadcasts.append(event)
@@ -103,7 +140,7 @@ def build_handler(
             announce_tracker=AnnounceTracker(
                 str(tmp_path / "ts.json"), announce_window_secs
             ),
-            emote_store=EmoteStore(None),
+            emote_store=await _seeded_emote_store(tmp_path, emotes),
             audio_dir=audio_dir,
             broadcast=capture,
             message_queue=None,  # handle() is called directly; the queue is unused
@@ -165,6 +202,46 @@ class TestEmoteOnlyMessages:
         instance = await build_handler(emote_sound_paths=[])
         await instance.handle(QueuedMessage(username="alice", text="🎉"))
         assert broadcasts == []
+
+
+class TestEmoteResolution:
+    # The three sizes differ so a bug that picked the 1x or 4x URL instead of
+    # the 2x one still fails here — same-looking URLs would hide it.
+    _CACHE = {
+        "Kappa": {
+            "url_1x": "https://cdn.example/emote/kappa/1.0",
+            "url_2x": "https://cdn.example/emote/kappa/2.0",
+            "url_4x": "https://cdn.example/emote/kappa/3.0",
+        }
+    }
+
+    async def test_known_emote_reaches_the_overlay_and_unknown_is_dropped(
+        self, build_handler, broadcasts
+    ) -> None:
+        """A cached Twitch emote name becomes an image the overlay can render.
+
+        Twitch tells the bot which emotes a message used, but only by name
+        ("Kappa"); the image URL comes from the local cache file the emote
+        fetcher builds.  This is the one path that turns those names into
+        pictures on stream, so both halves of it are pinned here: a name the
+        cache knows about arrives as an EmoteItem carrying the 2x URL, and a
+        name it does not know is left out of the list rather than crashing the
+        message or reaching the browser with a missing URL.
+        """
+        instance = await build_handler(emotes=self._CACHE)
+
+        await instance.handle(
+            QueuedMessage(
+                username="alice",
+                text="hello there",
+                emote_names=["Kappa", "NotInTheCache"],
+            )
+        )
+
+        assert len(broadcasts) == 1
+        assert broadcasts[0].emotes == [
+            EmoteItem(name="Kappa", url=self._CACHE["Kappa"]["url_2x"])
+        ]
 
 
 class TestAnnouncePrefix:
