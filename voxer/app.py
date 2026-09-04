@@ -42,6 +42,7 @@ from .config import (
     TIMESTAMPS_DB_PATH,
     TOKEN_FILE,
     VOICES_DIR,
+    WS_SEND_TIMEOUT,
     validate_config,
 )
 from .handler import MessageHandler
@@ -119,7 +120,12 @@ async def run() -> None:
     tts = TTSService(voices_dir=Path(VOICES_DIR))
 
     # AudioServer owns the Starlette app, WebSocket client set, and MP3 cleanup.
-    server = AudioServer(audio_dir=audio_dir, host=SERVER_HOST, port=SERVER_PORT)
+    server = AudioServer(
+        audio_dir=audio_dir,
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+        send_timeout=WS_SEND_TIMEOUT,
+    )
 
     # Persistence: each store owns one pickledb file.  The engine is the single
     # source of truth for which voices exist, so the pool comes from it.

@@ -122,6 +122,16 @@ VOICES_DIR: str = os.getenv("VOXER_VOICES_DIR", "voices")
 # ── HTTP / WebSocket server ───────────────────────────────────────────────────
 SERVER_HOST: str = os.getenv("VOXER_SERVER_HOST", "0.0.0.0")
 SERVER_PORT: int = _env_int("VOXER_SERVER_PORT", "8080", maximum=65535)
+# How many seconds one overlay client may take to accept a WebSocket message
+# before the server gives up on it and drops the connection.  Broadcasts are
+# sent to clients one after another from the same task that drains the message
+# queue, so a browser that stops reading its socket (a paused OBS source, a
+# suspended laptop) holds up every message behind it: nothing raises, the send
+# simply never finishes.  This is the deadline that turns that silent stall
+# into a dropped client and one warning line.  Five seconds is far longer than
+# a healthy client on the same machine ever needs, and far shorter than the
+# ~40 s uvicorn's own keepalive takes to notice.
+WS_SEND_TIMEOUT: int = _env_int("VOXER_WS_SEND_TIMEOUT", "5")
 
 # ── OAuth / token persistence ─────────────────────────────────────────────────
 # twitchio's built-in web adapter serves the OAuth flow:

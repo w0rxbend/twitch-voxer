@@ -140,6 +140,11 @@ def build_handler(
     Pass `broadcast_raises` to make delivery to the overlay fail — that is how a
     real WebSocket fan-out failure is simulated, since the handler only ever sees
     `broadcast` as an awaitable it calls.
+
+    Pass `delivered` to say how many overlay clients received the event, which
+    is what the real `AudioServer.broadcast` returns.  The default of 1 stands
+    for the ordinary case of one OBS browser source being connected; 0 is the
+    equally ordinary case of the stream being offline with nothing listening.
     """
 
     async def _build(
@@ -149,11 +154,13 @@ def build_handler(
         announce_window_secs: int = 300,
         emotes: dict[str, dict[str, str]] | None = None,
         broadcast_raises: type[BaseException] | None = None,
+        delivered: int = 1,
     ) -> MessageHandler:
-        async def capture(event: BroadcastEvent) -> None:
+        async def capture(event: BroadcastEvent) -> int:
             broadcasts.append(event)
             if broadcast_raises is not None:
                 raise broadcast_raises("broadcast failed")
+            return delivered
 
         instance = MessageHandler(
             tts=fake_tts,
@@ -441,3 +448,46 @@ class TestBroadcastFailureLeavesNoOrphans:
             await instance.handle(QueuedMessage(username="alice", text="🎉"))
 
         assert list(audio_dir.iterdir()) == []
+
+
+class TestUndeliveredAudioIsDeleted:
+    """A clip nobody received is deleted straight away, not left behind.
+
+    This is the same orphan problem as the class above, arriving by the quieter
+    route: the broadcast works perfectly, it just reaches nobody, because the
+    overlay is closed.  There is exactly one thing that ever deletes a generated
+    MP3 in normal operation — a browser plays it and sends {"done": "<name>"}
+    back — so with no browser attached that message is never coming and the file
+    stays in the audio directory forever.  A bot left running while the stream
+    is offline used to add one file per spoken message, on a Docker volume, with
+    nothing logged and nothing cleaning up until the next restart.
+
+    `broadcast` returning the number of clients it reached is what makes the
+    difference visible to the handler at all; both paths that produce a clip are
+    checked here because both hand their file to the same _publish.
+    """
+
+    async def test_synthesis_path_removes_the_unheard_mp3(
+        self, build_handler, broadcasts, audio_dir
+    ) -> None:
+        instance = await build_handler(delivered=0)
+
+        await instance.handle(QueuedMessage(username="alice", text="hello there"))
+
+        # The event was still built and sent — this is not "nothing happened"
+        assert len(broadcasts) == 1
+        assert list(audio_dir.iterdir()) == []
+
+    async def test_emote_only_path_removes_the_unheard_mp3(
+        self, build_handler, broadcasts, audio_dir, tmp_path
+    ) -> None:
+        sound = tmp_path / "ping.mp3"
+        sound.write_bytes(b"fake-mp3")
+        instance = await build_handler(emote_sound_paths=[str(sound)], delivered=0)
+
+        await instance.handle(QueuedMessage(username="alice", text="🎉"))
+
+        assert len(broadcasts) == 1
+        assert list(audio_dir.iterdir()) == []
+        # The copied-from source sound is not the handler's to delete
+        assert sound.exists()

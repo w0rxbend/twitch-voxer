@@ -73,7 +73,7 @@ class MessageHandler:
         announce_tracker: AnnounceTracker,
         emote_store: EmoteStore,
         audio_dir: Path,
-        broadcast: Callable[[BroadcastEvent], Awaitable[None]],
+        broadcast: Callable[[BroadcastEvent], Awaitable[int]],
         message_queue: asyncio.Queue["QueuedMessage"],
         emote_sound_paths: list[str] | None = None,
         no_announce_users: frozenset[str] | None = None,
@@ -86,7 +86,8 @@ class MessageHandler:
             announce_tracker: Announce-window bookkeeping per username.
             emote_store: Emote name → image URL lookups for the overlay.
             audio_dir: Directory for storing generated MP3 files.
-            broadcast: Async callable to broadcast audio via WebSocket to connected clients.
+            broadcast: Async callable that pushes the event to every connected
+                       overlay and returns how many of them received it.
             message_queue: Queue for receiving messages from the bot.
             emote_sound_paths: MP3 files to pick from randomly for emote-only messages.
             no_announce_users: Usernames that never get the announcement prefix.
@@ -183,12 +184,23 @@ class MessageHandler:
     ) -> None:
         """Announce a finished MP3 to every connected overlay, or delete it.
 
-        Once this returns, the file's whole future is the browser's: it lives in
-        audio_dir until a client plays it and sends {"done": "<name>.mp3"} back,
-        which is what makes server.py unlink it.  So if the broadcast itself
-        fails, nobody will ever ask for that deletion and the file would sit
-        there forever — hence the unlink on the way out.  BaseException rather
-        than Exception, because a cancelled task must not leak a file either.
+        When at least one browser receives the event, the file's whole future is
+        that browser's: it lives in audio_dir until the clip has played and the
+        client sends {"done": "<name>.mp3"} back, which is what makes server.py
+        unlink it.
+
+        Two cases mean that message is never coming, and both end with the file
+        deleted here instead of sitting in audio_dir forever:
+
+          - the broadcast itself failed, so nothing was told about the file.
+            Caught as BaseException rather than Exception, because a cancelled
+            task must not leak a file either.
+          - the broadcast succeeded but reached nobody.  This is the ordinary
+            state of the bot whenever the overlay is closed — the stream is
+            offline, or OBS has not been started — so every message spoken in
+            that state used to add one more permanently orphaned MP3, on a
+            Docker volume, with nothing to log it and nothing to clean it up
+            until the next restart.
         """
         event = BroadcastEvent(
             audio_url=audio_url_for(mp3_path.name),
@@ -203,10 +215,15 @@ class MessageHandler:
             [e.name for e in emotes],
         )
         try:
-            await self._broadcast(event)
+            delivered = await self._broadcast(event)
         except BaseException:
             mp3_path.unlink(missing_ok=True)
             raise
+        if delivered == 0:
+            LOGGER.debug(
+                "No overlay client received %s — deleting it now", mp3_path.name
+            )
+            mp3_path.unlink(missing_ok=True)
 
     async def _synthesize_and_broadcast(
         self,

@@ -99,7 +99,7 @@ sequenceDiagram
     app->>app: setup_logging() → validate_config()  ← CLIENT_ID/SECRET, BOT_USERNAME, redirect URL
     app->>app: mkdir audio dir + token-file dir, sweep stale *.mp3
     app->>tts: TTSService(voices_dir)
-    app->>srv: AudioServer(audio_dir, host, port)
+    app->>srv: AudioServer(audio_dir, host, port, send_timeout)
     app->>sto: VoiceStore(db_path, tts.voice_names) + AnnounceTracker(...) + EmoteStore(...)
     app->>hdl: MessageHandler(tts, voice_store, announce_tracker, emote_store, broadcast, queue, ...)
     app->>hdl: await handler.preload_resources()  ← loads all three stores
@@ -276,7 +276,7 @@ sequenceDiagram
 | Pure text rules extracted into `textnorm.py` | Bot filtering, emoji extraction, and normalisation are side-effect-free functions; separating them lets the rules be unit-tested without importing twitchio or the TTS engine. |
 | Separate `preload_resources()` method on `MessageHandler` | `async def __init__` is not valid Python; `preload_resources()` performs the three async store loads that must happen before messages are processed. |
 | Scheduler started only after `ensure_authorized()` | The scheduler posts to chat, which requires a user token; starting it with the other tasks would 401 on every attempt until the first-run browser grant completes. |
-| Audio file deleted by the browser client | The server cannot know when the browser finishes playing; the client sends a `{done: filename}` WS message after the `<audio>` element fires `ended`, then the server unlinks the file. |
+| Audio file deleted by the browser client | The server cannot know when the browser finishes playing; the client sends a `{done: filename}` WS message after the `<audio>` element fires `ended`, then the server unlinks the file. `broadcast()` returns how many clients it reached so the one case that message can never arrive in — nobody was listening — is handled at the source: `MessageHandler._publish` deletes the file immediately rather than orphaning it. |
 | Path traversal check before unlink | `path.parent == self._audio_dir.resolve()` prevents a malicious WS message from deleting arbitrary files on the server. |
 | data/messages.json reloaded every scheduler cycle | Allows live edits to messages and frequencies without restarting the bot; the DB read is cheap. |
 | Longest abbreviation first in regex alternation | Without longest-first ordering, shorter prefixes (`gg`) would match before longer keys (`ggwp`), producing wrong expansions. |

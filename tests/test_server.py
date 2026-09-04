@@ -11,9 +11,12 @@ Three groups of tests, each driving the code the way production does:
     and the same file deletion as a live OBS browser source does, so they keep
     holding after the endpoint's internals are rearranged.
   - `broadcast()` is called directly with hand-written fake sockets, because
-    the two behaviours worth pinning (every live client is reached; a client
-    that raises is dropped without stopping the others) cannot be provoked
-    through a real connection on demand.
+    the behaviours worth pinning (every live client is reached; a client that
+    raises is dropped without stopping the others; a client that accepts
+    nothing is dropped rather than allowed to hold the pipeline up; and the
+    count of clients actually reached, which is what tells the handler whether
+    an MP3 will ever be played) cannot be provoked through a real connection on
+    demand.
 
 A note on timing.  `TestClient` hands a WebSocket message to the application
 asynchronously: `send_text` returns as soon as the message is queued, not once
@@ -25,6 +28,7 @@ take effect: messages on a single socket are processed in order, so once the
 later effect is visible the earlier message has definitely been handled too.
 """
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -40,6 +44,12 @@ from voxer.server import AudioServer, resolve_audio_file
 # declaring the test failed.  Generous, because it is only ever paid in full
 # when something is genuinely broken; the happy path returns in milliseconds.
 _DELETION_TIMEOUT_SECONDS = 5.0
+
+# The per-client send deadline every server built here runs with.  Production
+# uses seconds (VOXER_WS_SEND_TIMEOUT, default 5); a quarter of a second is
+# still thousands of times longer than an in-memory fake needs to accept a
+# string, and it is what keeps the stalled-client test quick.
+_TEST_SEND_TIMEOUT = 0.25
 
 
 def _wait_until_deleted(path: Path) -> bool:
@@ -57,9 +67,10 @@ def server(tmp_path: Path) -> AudioServer:
     """An AudioServer whose audio directory is a fresh temporary directory.
 
     Host and port are never used: `serve()` is what binds the socket and no
-    test calls it, so nothing here listens on the network.
+    test calls it, so nothing here listens on the network.  The send deadline
+    is deliberately tiny so a test can stall a client without stalling itself.
     """
-    return AudioServer(tmp_path, "127.0.0.1", 0)
+    return AudioServer(tmp_path, "127.0.0.1", 0, _TEST_SEND_TIMEOUT)
 
 
 # --------------------------------------------------------------------------
@@ -212,6 +223,26 @@ class FakeSocket:
         self.sent.append(message)
 
 
+class StalledSocket:
+    """A client that is still connected but has stopped reading its socket.
+
+    This is what a paused OBS browser source or a suspended laptop looks like
+    from the server: nothing raises and nothing closes, the send just never
+    finishes.  `asyncio.Event().wait()` reproduces that exactly — it blocks
+    forever and, unlike `time.sleep`, yields to the event loop so the rest of
+    the broadcast can be observed while this one client hangs.
+    """
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def send_text(self, message: str) -> None:
+        await asyncio.Event().wait()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def _event() -> BroadcastEvent:
     return BroadcastEvent(
         audio_url="/audio/clip.mp3",
@@ -229,7 +260,9 @@ async def test_broadcast_reaches_every_connected_client(server: AudioServer) -> 
     # members, calling send_text and nothing else.
     server._clients = {first, second}
 
-    await server.broadcast(_event())
+    delivered = await server.broadcast(_event())
+
+    assert delivered == 2
 
     expected: dict[str, Any] = {
         "audio_url": "/audio/clip.mp3",
@@ -254,17 +287,58 @@ async def test_broadcast_drops_a_raising_client_and_still_serves_the_rest(
     dead, alive = FakeSocket(raises=True), FakeSocket()
     server._clients = {dead, alive}
 
-    await server.broadcast(_event())
+    delivered = await server.broadcast(_event())
 
+    assert delivered == 1
     assert len(alive.sent) == 1
     assert server._clients == {alive}
 
 
-async def test_broadcast_with_no_clients_is_a_no_op(server: AudioServer) -> None:
-    """With nothing connected, broadcasting is harmless and changes nothing.
+async def test_broadcast_with_no_clients_reports_zero_deliveries(
+    server: AudioServer,
+) -> None:
+    """With nothing connected, broadcasting is harmless and reports 0 reached.
 
-    This is the common case while the stream is offline but the bot is running.
+    This is the common case while the stream is offline but the bot is running,
+    and the zero is load-bearing rather than cosmetic: it is what tells
+    MessageHandler that no browser will ever send back the "done" message for
+    this clip, so the MP3 has to be deleted at the source instead of being left
+    in the audio directory for nobody.
     """
-    await server.broadcast(_event())
+    delivered = await server.broadcast(_event())
 
+    assert delivered == 0
     assert server._clients == set()
+
+
+async def test_broadcast_drops_a_stalled_client_and_still_serves_the_rest(
+    server: AudioServer,
+) -> None:
+    """A client that accepts nothing is given up on, not waited for.
+
+    Clients are served one after another, and broadcast() is awaited from the
+    single task that drains the message queue, so a browser that stops reading
+    its socket used to hold up the entire bot: no exception was raised and no
+    connection was closed, the send simply never completed.  Chat kept arriving,
+    the bounded queue filled, and messages were dropped with nothing logged to
+    say why.  Now the send has a deadline, and missing it costs that one client
+    its connection and nothing else.
+
+    The whole call is wrapped in a deadline of its own.  Without it, a
+    regression here would hang the test suite instead of failing it — the exact
+    failure mode this test exists to prevent.
+    """
+    stalled, alive = StalledSocket(), FakeSocket()
+    server._clients = {stalled, alive}
+
+    async with asyncio.timeout(_TEST_SEND_TIMEOUT * 20):
+        delivered = await server.broadcast(_event())
+
+    # The healthy client is served whichever order the set happens to iterate in
+    assert delivered == 1
+    assert len(alive.sent) == 1
+    assert server._clients == {alive}
+    # Closed as well as forgotten, so the endpoint holding that connection
+    # finishes instead of sitting in receive_text() until uvicorn's keepalive
+    # eventually notices.
+    assert stalled.closed

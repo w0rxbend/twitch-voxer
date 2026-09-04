@@ -13,8 +13,14 @@ Audio file lifecycle:
   4. The browser sends {"done": "filename.mp3"} back over the WebSocket.
   5. _handle_ws passes that name to _delete_played_audio, which unlinks the
      file from audio_dir (path-traversal check included).
+
+Steps 3-5 only ever happen if some browser received the event, so broadcast()
+reports how many clients it reached.  When that count is zero — the usual case
+while the stream is offline — MessageHandler deletes the file itself, because
+no "done" message is ever going to arrive for it.
 """
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -75,17 +81,27 @@ def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
 class AudioServer:
     """Starlette-based HTTP + WebSocket server for audio delivery to the browser overlay."""
 
-    def __init__(self, audio_dir: Path, host: str, port: int) -> None:
+    def __init__(
+        self, audio_dir: Path, host: str, port: int, send_timeout: float
+    ) -> None:
         """Initialize the audio server with directory and network settings.
 
         Args:
             audio_dir: Directory from which MP3 files are served and cleaned up.
             host: Host address to bind the HTTP/WebSocket server.
             port: TCP port to listen on.
+            send_timeout: Seconds a single client may take to accept one
+                broadcast before it is treated as stalled and dropped.  It has
+                no default here on purpose: like the host and the port it is a
+                deployment setting, and the composition root (voxer/app.py) is
+                the one place that reads those from the environment.  Tests
+                pass a small value so a deliberately stalled client does not
+                make the suite wait.  See broadcast() for what it protects.
         """
         self._audio_dir = audio_dir
         self._host = host
         self._port = port
+        self._send_timeout = send_timeout
         # Set of active WebSocket connections; used by broadcast() for fan-out.
         # A plain set is fine here because all access happens on the single asyncio thread.
         self._clients: set[WebSocket] = set()
@@ -187,31 +203,91 @@ class AudioServer:
         path.unlink(missing_ok=True)
         LOGGER.debug("Cleaned up audio file: %s", filename)
 
-    async def broadcast(self, event: BroadcastEvent) -> None:
-        """Send an audio event to all connected WebSocket clients.
+    async def _close_quietly(self, websocket: WebSocket) -> None:
+        """Ask one abandoned client to hang up, without waiting on it.
+
+        Dropping a client from `self._clients` stops us sending to it, but its
+        own _handle_ws coroutine is still parked in receive_text() with the
+        connection open.  Closing prompts that coroutine to finish, so its
+        `finally` runs and the connection is released now instead of whenever
+        uvicorn's keepalive gets round to noticing.
+
+        Best effort in both directions.  The close frame travels down the very
+        socket that has just refused to accept a message, so it could hang for
+        exactly the same reason and is given the same deadline; and every
+        failure is swallowed, because there is nothing useful left to do about
+        a client we have already given up on.  TimeoutError is a subclass of
+        Exception, so the one clause below covers the deadline too.
+        """
+        try:
+            async with asyncio.timeout(self._send_timeout):
+                await websocket.close()
+        except Exception:
+            LOGGER.debug("Ignoring failure while closing a client", exc_info=True)
+
+    async def broadcast(self, event: BroadcastEvent) -> int:
+        """Send an audio event to all connected clients, and report how many got it.
 
         Uses a snapshot of the client set to avoid mutation-during-iteration.
-        Stale clients (those that raise on send) are collected and removed after
-        the iteration so subsequent messages skip them.
+        Stale clients (those that raise on send, and those that do not accept
+        the message in time) are collected and removed after the iteration so
+        subsequent messages skip them.
+
+        Why the count is returned.  The MP3 this event points at is deleted by
+        exactly one mechanism: a browser plays it and sends {"done": "<name>"}
+        back, which is what makes _delete_played_audio unlink it.  If no client
+        received the event, that message is never coming, so the caller has to
+        deal with the file itself — see MessageHandler._publish.  Without the
+        count it could not tell the difference, and every message spoken while
+        the overlay was closed left a file in audio_dir forever.
+
+        Why each send has a deadline.  Clients are served one after another,
+        and this coroutine is awaited from the single task that drains the
+        message queue.  A browser that stops reading its socket — a paused OBS
+        source, a suspended laptop — therefore applies TCP backpressure all the
+        way back to speech synthesis.  Nothing raises: the send simply never
+        finishes, so the bot goes quiet, the bounded queue fills and incoming
+        chat starts being dropped, with no error logged anywhere.  Giving each
+        send `send_timeout` seconds turns that into one dropped client.
 
         Args:
             event: BroadcastEvent with audio_url, username, avatar_url, and emotes list.
+
+        Returns:
+            The number of clients the message was handed to; 0 if none are
+            connected or none of them accepted it.
         """
         if not self._clients:
             LOGGER.debug("No WS clients connected, skipping broadcast")
-            return
+            return 0
         LOGGER.info(
             "Broadcasting to %d client(s): %s", len(self._clients), event.audio_url
         )
         # dataclasses.asdict() recursively converts nested dataclasses (e.g. EmoteItem)
         message = json.dumps(dataclasses.asdict(event))
+        delivered = 0
         dead: set[WebSocket] = set()
         # Iterate over a snapshot: each send awaits, and during that await the
-        # event loop can run ws_endpoint, which adds/removes clients — mutating
+        # event loop can run _handle_ws, which adds/removes clients — mutating
         # the live set mid-iteration would raise RuntimeError.
         for ws in list(self._clients):
             try:
-                await ws.send_text(message)
+                async with asyncio.timeout(self._send_timeout):
+                    await ws.send_text(message)
+            except TimeoutError:
+                # Deliberately separate from the failure below, because it is a
+                # different situation and deserves to be recognisable in the
+                # log: a raising socket is a browser that went away, which is
+                # ordinary, while one that accepts nothing for seconds is a
+                # browser that is still connected and not reading.  That is the
+                # case that used to stall the whole pipeline silently.
+                LOGGER.warning(
+                    "Overlay client took more than %ss to accept a message — "
+                    "dropping it",
+                    self._send_timeout,
+                )
+                dead.add(ws)
+                await self._close_quietly(ws)
             except Exception:
                 # Nearly always a client that vanished between messages, but it
                 # could equally be a bug on our side, and the warning below
@@ -222,9 +298,12 @@ class AudioServer:
                 # client that has not been sent to yet.
                 LOGGER.debug("Dropping client after send failure", exc_info=True)
                 dead.add(ws)
+            else:
+                delivered += 1
         if dead:
             LOGGER.warning("Dropped %d stale client(s)", len(dead))
         self._clients -= dead
+        return delivered
 
     async def serve(self) -> None:
         """Start the uvicorn server and block until shutdown.
