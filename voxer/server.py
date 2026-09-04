@@ -18,6 +18,13 @@ Steps 3-5 only ever happen if some browser received the event, so broadcast()
 reports how many clients it reached.  When that count is zero — the usual case
 while the stream is offline — MessageHandler deletes the file itself, because
 no "done" message is ever going to arrive for it.
+
+Some files still slip through both of those: a browser that crashes or is
+refreshed mid-playback never sends its "done" message, and neither does one
+whose connection drops between receiving the event and finishing the clip.
+sweep_audio_dir() deletes what is left over, and reap_audio() runs it on a
+timer for the whole life of the process, so audio_dir cannot grow without
+bound across a long stream.
 """
 
 import asyncio
@@ -25,6 +32,7 @@ import contextlib
 import dataclasses
 import json
 import logging
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Final
@@ -78,6 +86,86 @@ def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
     if path.parent != audio_dir.resolve():
         return None
     return path
+
+
+def sweep_audio_dir(audio_dir: Path, min_age_secs: float = 0.0) -> int:
+    """Delete leftover MP3s from audio_dir and report how many were removed.
+
+    Everything in audio_dir is a temporary clip: it is written just before it
+    is broadcast and is meant to be deleted the moment the browser reports that
+    it finished playing.  A file that is still there long afterwards is one
+    whose "done" message never arrived — the browser crashed, the viewer hit
+    refresh in the middle of the clip, or the WebSocket dropped between the two
+    events.  Nothing else ever removes those, so without this they accumulate
+    for as long as the bot runs.
+
+    Args:
+        audio_dir: The directory MP3s are written to and served from.  A
+            directory that does not exist is not an error; there is simply
+            nothing to sweep.
+        min_age_secs: How old a file must be, in seconds since it was last
+            written, before it is considered abandoned.  The default of 0 means
+            "every file counts", which is what the sweep at startup wants: the
+            process that could have been playing them is gone, so all of them
+            are stale.  A running bot passes a real age instead, because a file
+            created seconds ago may still be on its way to a browser, and
+            deleting it then would cut a clip off mid-sentence.
+
+    Returns:
+        The number of files actually deleted, so the caller can decide whether
+        there is anything worth logging.
+    """
+    cutoff = time.time() - min_age_secs
+    removed = 0
+    for mp3 in audio_dir.glob("*.mp3"):
+        try:
+            # With no minimum age every file qualifies, so the modification
+            # time is not consulted at all — asking for it would add a way to
+            # fail (and a way for a clock skewed into the future to make the
+            # startup sweep keep a file it is supposed to remove).
+            if min_age_secs > 0 and mp3.stat().st_mtime > cutoff:
+                continue
+            mp3.unlink()
+        except OSError:
+            # Either the file went away between the listing and now, or it is
+            # not ours to delete (a permission problem on a mounted volume).
+            # Neither is worth interrupting the sweep for: the next pass will
+            # try again, and debug logging keeps the detail available.
+            LOGGER.debug("Could not remove %s", mp3, exc_info=True)
+            continue
+        removed += 1
+    return removed
+
+
+async def reap_audio(audio_dir: Path, interval: float, min_age: float) -> None:
+    """Sweep audio_dir on a timer, for as long as the application runs.
+
+    This is one of the long-running coroutines the composition root starts in
+    its asyncio.TaskGroup (voxer/app.py), which is also how it is stopped: at
+    shutdown the task is cancelled while it waits, and the cancellation ends
+    the loop.  It needs no lifecycle of its own.
+
+    The first sweep happens after `interval`, not immediately, because startup
+    has just swept the directory clean and a file created in the meantime is
+    younger than any sensible `min_age`.
+
+    Args:
+        audio_dir: The directory to sweep.
+        interval: Seconds to wait between sweeps.
+        min_age: Minimum age in seconds before a file is deleted — see
+            sweep_audio_dir, which does the actual work.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        removed = sweep_audio_dir(audio_dir, min_age)
+        # Silence when there is nothing to do is the point: this runs every few
+        # minutes forever, and a line per sweep would bury the events an
+        # operator actually reads.  A count that is not zero is worth seeing,
+        # because it says clips are being orphaned somewhere.
+        if removed:
+            LOGGER.info(
+                "Reaped %d orphaned audio file(s) older than %ss", removed, min_age
+            )
 
 
 class _QuietServer(uvicorn.Server):

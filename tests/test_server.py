@@ -1,7 +1,7 @@
 """Unit tests for voxer.server: the overlay routes, the WebSocket protocol,
-the broadcast fan-out and the uvicorn signal seam.
+the broadcast fan-out, the orphaned-audio reaper and the uvicorn signal seam.
 
-Four groups of tests, each driving the code the way production does:
+Five groups of tests, each driving the code the way production does:
 
   - `resolve_audio_file` is a pure function, so it is called directly.
   - The HTTP routes and the WebSocket endpoint are exercised through the real
@@ -17,6 +17,11 @@ Four groups of tests, each driving the code the way production does:
     count of clients actually reached, which is what tells the handler whether
     an MP3 will ever be played) cannot be provoked through a real connection on
     demand.
+  - `sweep_audio_dir` works on real files in a real temporary directory, with
+    modification times pushed into the past by `os.utime` so a file can be
+    "old" without the test waiting for it to age.  `reap_audio` is started as a
+    real task with a tiny interval and cancelled at the end, the way the
+    composition root's task group cancels it at shutdown.
   - `_QuietServer.capture_signals()` is called directly and the process's
     registered signal handlers are read back around it, because the thing being
     checked is a side effect on the operating system rather than a value.
@@ -32,7 +37,10 @@ later effect is visible the earlier message has definitely been handled too.
 """
 
 import asyncio
+import contextlib
 import json
+import logging
+import os
 import signal
 import time
 from pathlib import Path
@@ -43,7 +51,13 @@ import uvicorn
 from starlette.testclient import TestClient
 
 from voxer.models import BroadcastEvent, EmoteItem
-from voxer.server import AudioServer, _QuietServer, resolve_audio_file
+from voxer.server import (
+    AudioServer,
+    _QuietServer,
+    reap_audio,
+    resolve_audio_file,
+    sweep_audio_dir,
+)
 
 # How long to wait for the server thread to act on a WebSocket message before
 # declaring the test failed.  Generous, because it is only ever paid in full
@@ -55,6 +69,11 @@ _DELETION_TIMEOUT_SECONDS = 5.0
 # still thousands of times longer than an in-memory fake needs to accept a
 # string, and it is what keeps the stalled-client test quick.
 _TEST_SEND_TIMEOUT = 0.25
+
+# How long the reaper waits between sweeps in the tests below.  Production uses
+# five minutes (VOXER_AUDIO_SWEEP_INTERVAL_SECS); a hundredth of a second keeps
+# these tests instant while exercising exactly the same loop.
+_TEST_REAP_INTERVAL = 0.01
 
 
 def _wait_until_deleted(path: Path) -> bool:
@@ -347,6 +366,148 @@ async def test_broadcast_drops_a_stalled_client_and_still_serves_the_rest(
     # finishes instead of sitting in receive_text() until uvicorn's keepalive
     # eventually notices.
     assert stalled.closed
+
+
+# --------------------------------------------------------------------------
+# sweep_audio_dir / reap_audio — clearing up clips nobody came back for
+# --------------------------------------------------------------------------
+
+
+def _mp3(directory: Path, name: str, *, age_secs: float = 0.0) -> Path:
+    """Create an MP3-named file and, optionally, backdate it.
+
+    The reaper decides what to delete from a file's modification time, so a
+    test needs files of a given age.  Waiting for one to get old would make the
+    suite slow, so `os.utime` rewrites the timestamp instead: it is the same
+    number `Path.stat().st_mtime` reports either way.
+    """
+    path = directory / name
+    path.write_bytes(b"not really audio")
+    if age_secs:
+        past = time.time() - age_secs
+        os.utime(path, (past, past))
+    return path
+
+
+def test_sweep_with_no_minimum_age_takes_every_file(tmp_path: Path) -> None:
+    """This is the sweep at startup: nothing is playing, so nothing is spared.
+
+    A brand-new file would survive any real age cutoff, which is exactly wrong
+    here — the process that could have been playing it died with the previous
+    run, so it is rubbish however recently it was written.
+    """
+    just_written = _mp3(tmp_path, "fresh.mp3")
+    long_dead = _mp3(tmp_path, "old.mp3", age_secs=3600)
+
+    removed = sweep_audio_dir(tmp_path)
+
+    assert removed == 2
+    assert not just_written.exists()
+    assert not long_dead.exists()
+
+
+def test_sweep_deletes_only_the_files_past_the_cutoff(tmp_path: Path) -> None:
+    """With a minimum age, an abandoned clip goes and a current one stays.
+
+    The sparing half is the one that matters most.  A file written seconds ago
+    may still be queued for synthesis, on its way to a browser, or playing
+    right now, and deleting it would cut the clip off mid-word — which is why
+    the shipped cutoff (five minutes) is far longer than any clip can live.
+    """
+    abandoned = _mp3(tmp_path, "abandoned.mp3", age_secs=600)
+    playing_now = _mp3(tmp_path, "playing.mp3")
+
+    removed = sweep_audio_dir(tmp_path, min_age_secs=300)
+
+    assert removed == 1
+    assert not abandoned.exists()
+    assert playing_now.exists()
+
+
+def test_sweep_leaves_files_that_are_not_mp3s_alone(tmp_path: Path) -> None:
+    """Only *.mp3 is swept, so a directory shared with anything else is safe.
+
+    audio_dir holds nothing but generated clips today, but it is a configurable
+    path (VOXER_AUDIO_DIR) that somebody could point at a directory of their
+    own, and a sweep that deleted whatever it found there would be a nasty
+    surprise.
+    """
+    keep = tmp_path / "notes.txt"
+    keep.write_text("not mine to delete")
+    # Backdated as far as the clip beside it, so the only thing that can save
+    # it is its name.  Left at its real age it would survive on age alone, and
+    # this test would keep passing even if the sweep grabbed every file.
+    past = time.time() - 600
+    os.utime(keep, (past, past))
+    _mp3(tmp_path, "clip.mp3", age_secs=600)
+
+    removed = sweep_audio_dir(tmp_path, min_age_secs=300)
+
+    assert removed == 1
+    assert keep.exists()
+
+
+def test_sweep_of_a_directory_that_does_not_exist_removes_nothing(
+    tmp_path: Path,
+) -> None:
+    """A missing directory is reported as an empty sweep, not an error.
+
+    The reaper runs inside the application's task group, where an exception
+    would cancel every sibling task and stop the bot.  Nothing should be able
+    to reach that from a directory somebody deleted underneath us.
+    """
+    assert sweep_audio_dir(tmp_path / "gone", min_age_secs=300) == 0
+
+
+async def test_reaper_keeps_deleting_orphans_and_reports_what_it_took(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The timer loop actually sweeps, and says so when it finds something.
+
+    This is the whole point of the reaper: a browser that crashes or is
+    refreshed in the middle of a clip never sends the "done" message that
+    deletes it, so those files used to sit in audio_dir until the next restart.
+    The task is cancelled at the end, which is how the composition root's task
+    group stops it during shutdown.
+    """
+    orphan = _mp3(tmp_path, "orphan.mp3", age_secs=600)
+    caplog.set_level(logging.INFO, logger="voxer.server")
+
+    task = asyncio.create_task(reap_audio(tmp_path, _TEST_REAP_INTERVAL, 300))
+    try:
+        async with asyncio.timeout(_DELETION_TIMEOUT_SECONDS):
+            while orphan.exists():
+                await asyncio.sleep(_TEST_REAP_INTERVAL)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    assert not orphan.exists()
+    assert "Reaped 1 orphaned audio file(s)" in caplog.text
+
+
+async def test_reaper_says_nothing_when_there_is_nothing_to_reap(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sweep that deletes nothing is silent, which is nearly every sweep.
+
+    The loop runs for as long as the bot does, every few minutes.  Logging each
+    pass would fill the log with lines that carry no information and bury the
+    ones an operator is actually reading.
+    """
+    playing_now = _mp3(tmp_path, "playing.mp3")
+    caplog.set_level(logging.INFO, logger="voxer.server")
+
+    task = asyncio.create_task(reap_audio(tmp_path, _TEST_REAP_INTERVAL, 300))
+    # Long enough for several sweeps to have come and gone.
+    await asyncio.sleep(_TEST_REAP_INTERVAL * 5)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert playing_now.exists()
+    assert caplog.records == []
 
 
 # --------------------------------------------------------------------------

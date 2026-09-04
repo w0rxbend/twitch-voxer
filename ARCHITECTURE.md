@@ -106,7 +106,7 @@ sequenceDiagram
     app->>bot: get_user_id(BOT_USERNAME)  ← one-shot Twitch API call, app token only
     app->>bot: VoxBot(bot_id, message_queue)  ← no subs yet
     app->>sch: Scheduler(bot.send_chat, messages_path, delays)
-    app->>app: TaskGroup: bot.start, server.serve, handler.process_queue
+    app->>app: TaskGroup: bot.start, server.serve, handler.process_queue, reap_audio
     Note over bot: bot.start() logs in, loads TOKEN_FILE,<br/>brings up the /oauth web adapter, serves EventSub
     app->>bot: await bot.wait_until_ready()
     app->>bot: await bot.ensure_authorized()  ← token file → env seeds → browser flow
@@ -276,7 +276,7 @@ sequenceDiagram
 | Pure text rules extracted into `textnorm.py` | Bot filtering, emoji extraction, and normalisation are side-effect-free functions; separating them lets the rules be unit-tested without importing twitchio or the TTS engine. |
 | Separate `preload_resources()` method on `MessageHandler` | `async def __init__` is not valid Python; `preload_resources()` performs the three async store loads that must happen before messages are processed. |
 | Scheduler started only after `ensure_authorized()` | The scheduler posts to chat, which requires a user token; starting it with the other tasks would 401 on every attempt until the first-run browser grant completes. |
-| Audio file deleted by the browser client | The server cannot know when the browser finishes playing; the client sends a `{done: filename}` WS message after the `<audio>` element fires `ended`, then the server unlinks the file. `broadcast()` returns how many clients it reached so the one case that message can never arrive in — nobody was listening — is handled at the source: `MessageHandler._publish` deletes the file immediately rather than orphaning it. |
+| Audio file deleted by the browser client | The server cannot know when the browser finishes playing; the client sends a `{done: filename}` WS message after the `<audio>` element fires `ended`, then the server unlinks the file. `broadcast()` returns how many clients it reached so the one case that message can never arrive in — nobody was listening — is handled at the source: `MessageHandler._publish` deletes the file immediately rather than orphaning it. What is left over — a browser that crashed or was refreshed mid-clip, so its `done` message never arrived — is collected by `reap_audio`, a task that sweeps `audio_dir` every `VOXER_AUDIO_SWEEP_INTERVAL_SECS` and deletes anything older than `VOXER_AUDIO_MAX_AGE_SECS`, so the directory cannot grow without bound across a long stream. |
 | Path traversal check before unlink | `path.parent == self._audio_dir.resolve()` prevents a malicious WS message from deleting arbitrary files on the server. |
 | data/messages.json reloaded every scheduler cycle | Allows live edits to messages and frequencies without restarting the bot; the DB read is cheap. |
 | Longest abbreviation first in regex alternation | Without longest-first ordering, shorter prefixes (`gg`) would match before longer keys (`ggwp`), producing wrong expansions. |

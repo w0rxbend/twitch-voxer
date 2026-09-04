@@ -35,6 +35,8 @@ from .bot import VoxBot, get_user_id
 from .config import (
     ANNOUNCE_WINDOW_SECS,
     AUDIO_DIR,
+    AUDIO_MAX_AGE_SECS,
+    AUDIO_SWEEP_INTERVAL_SECS,
     BOT_USERNAME,
     DB_PATH,
     EMOTE_SOUND_PATHS,
@@ -56,7 +58,7 @@ from .handler import MessageHandler
 from .log import setup_logging
 from .models import QueuedMessage
 from .scheduler import Scheduler
-from .server import AudioServer
+from .server import AudioServer, reap_audio, sweep_audio_dir
 from .stores import AnnounceTracker, EmoteStore, VoiceStore
 from .tts import TTSService
 
@@ -107,12 +109,12 @@ async def run() -> None:
 
     # MP3s are normally deleted when the overlay reports playback done, but
     # files leak when no client is connected or the process is restarted
-    # mid-playback.  Everything in audio_dir is ephemeral, so sweep it at boot.
-    stale = list(audio_dir.glob("*.mp3"))
-    for mp3 in stale:
-        mp3.unlink(missing_ok=True)
-    if stale:
-        LOGGER.info("Removed %d leftover audio file(s) from previous runs", len(stale))
+    # mid-playback.  Everything in audio_dir is ephemeral and nothing was
+    # playing a moment ago, so the boot sweep takes every file regardless of
+    # age — that is what sweep_audio_dir's default minimum age of 0 means.
+    leftovers = sweep_audio_dir(audio_dir)
+    if leftovers:
+        LOGGER.info("Removed %d leftover audio file(s) from previous runs", leftovers)
 
     # Single shared queue: VoxBot puts QueuedMessages, MessageHandler drains them.
     # Using a queue decouples fast Twitch event arrival from slow TTS synthesis.
@@ -243,6 +245,19 @@ async def run() -> None:
                 tg.create_task(bot.start())  # Twitch EventSub WebSocket
                 tg.create_task(server.serve())  # Starlette HTTP + WebSocket server
                 tg.create_task(handler.process_queue())  # TTS synthesis loop
+
+                # The boot sweep above only cleans up what a previous run left
+                # behind.  This one keeps running: a browser that crashes or is
+                # refreshed in the middle of a clip never sends the "done"
+                # message that deletes it, so without a periodic sweep those
+                # files stay in audio_dir for the rest of the stream.
+                tg.create_task(
+                    reap_audio(
+                        audio_dir,
+                        AUDIO_SWEEP_INTERVAL_SECS,
+                        AUDIO_MAX_AGE_SECS,
+                    )
+                )
 
                 # Wait for login + adapter, then block until a user token exists
                 # (stored, env-seeded, or granted through the browser flow).

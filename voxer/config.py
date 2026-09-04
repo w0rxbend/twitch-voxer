@@ -132,6 +132,21 @@ SERVER_PORT: int = _env_int("VOXER_SERVER_PORT", "8080", maximum=65535)
 # a healthy client on the same machine ever needs, and far shorter than the
 # ~40 s uvicorn's own keepalive takes to notice.
 WS_SEND_TIMEOUT: int = _env_int("VOXER_WS_SEND_TIMEOUT", "5")
+# How the overlay's audio directory is kept from growing without bound.  An MP3
+# is normally deleted the moment the browser reports it finished playing, but a
+# browser that crashes or is refreshed mid-clip never sends that report, so the
+# file stays behind with nothing to remove it.  A background task sweeps the
+# directory every AUDIO_SWEEP_INTERVAL_SECS seconds and deletes every MP3 that
+# has not been written to for at least AUDIO_MAX_AGE_SECS.
+#
+# The age is the safety margin, and it is deliberately generous: a file younger
+# than the cutoff may still be queued for synthesis, in flight to a browser or
+# playing right now, and deleting one of those would cut a clip off mid-word.
+# Five minutes is far longer than the longest plausible chat message plus the
+# time it can spend waiting in the message queue, and still short enough that a
+# multi-day stream never accumulates more than a handful of dead files.
+AUDIO_SWEEP_INTERVAL_SECS: int = _env_int("VOXER_AUDIO_SWEEP_INTERVAL_SECS", "300")
+AUDIO_MAX_AGE_SECS: int = _env_int("VOXER_AUDIO_MAX_AGE_SECS", "300")
 
 # ── OAuth / token persistence ─────────────────────────────────────────────────
 # twitchio's built-in web adapter serves the OAuth flow:
