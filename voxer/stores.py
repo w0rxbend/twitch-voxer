@@ -50,11 +50,16 @@ class VoiceStore:
         self._voices = list(voices)
         self._lock = asyncio.Lock()
 
-    def random_voice(self) -> str:
+    def _random_voice(self) -> str:
         """Pick a voice from the pool at random.
 
-        Used for a brand-new chatter's assignment and for channel-event
-        announcements, which are never tied to a persistent identity.
+        Private because picking is only ever a step of assignment: the sole
+        caller is get_or_assign() below.  It used to be public so that
+        channel-event announcements could borrow it for their throwaway voice,
+        which made this store look like the place to ask "which voices exist?"
+        — a question it cannot answer, since the pool is handed to it by
+        whoever constructed it.  Those announcements now ask the TTS engine
+        directly, so the name says what is true again.
         """
         return random.choice(self._voices)
 
@@ -79,7 +84,7 @@ class VoiceStore:
                         voice,
                         username,
                     )
-                voice = self.random_voice()
+                voice = self._random_voice()
                 await self._db.set(username, voice)
                 LOGGER.info("New chatter %s — assigned voice %s", username, voice)
                 await self._db.save()

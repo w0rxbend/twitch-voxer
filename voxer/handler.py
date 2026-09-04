@@ -90,6 +90,7 @@ class MessageHandler:
             message_queue: Queue for receiving messages from the bot.
             emote_sound_paths: MP3 files to pick from randomly for emote-only messages.
             no_announce_users: Usernames that never get the announcement prefix.
+                               Matched case-insensitively; see below.
         """
         LOGGER.debug("Initialising MessageHandler (audio_dir=%s)", audio_dir)
         self._tts = tts
@@ -104,7 +105,16 @@ class MessageHandler:
         self._emote_sounds: list[Path] = [
             p for raw in (emote_sound_paths or []) if (p := Path(raw)).exists()
         ]
-        self._no_announce_users: frozenset[str] = no_announce_users or frozenset()
+        # Lower-cased here, at the boundary, because the comparison further down
+        # lower-cases the incoming username and would otherwise never match a
+        # capitalised entry.  config.py already lower-cases what it passes in, so
+        # nothing changes for the running bot; the point is that the guarantee
+        # now belongs to this class.  Before, a caller that built the set any
+        # other way — a test, a future second composition root — silently got the
+        # opposite behaviour, with no error to say why the prefix kept appearing.
+        self._no_announce_users: frozenset[str] = frozenset(
+            user.lower() for user in (no_announce_users or ())
+        )
         LOGGER.info("MessageHandler ready")
 
     async def preload_resources(self) -> None:
@@ -240,17 +250,27 @@ class MessageHandler:
     async def _handle_system(self, message: QueuedMessage) -> None:
         """Synthesise a channel-event announcement directly, bypassing all user checks.
 
-        Uses a random voice from the pool.  Synthesised in DEFAULT_LANG, which is
-        Ukrainian, because all event announcement strings in events.py are written
-        in Ukrainian.  Naming the constant rather than repeating the literal "uk"
-        keeps this site in step with the language the rest of the pipeline falls
-        back to, instead of quietly disagreeing with it after a future change.
+        The voice is picked at random from the TTS engine's own pool.  That pool
+        is asked for directly rather than through VoiceStore, because a channel
+        event has no persistent identity to remember: nothing about this pick is
+        ever written down or looked up again.  VoiceStore exists to remember
+        which voice belongs to which chatter, so asking it for a throwaway value
+        it never stores read as if the pick mattered beyond this one
+        announcement.  TTSService is the object that knows which voices exist
+        (built-ins plus anything loaded from the voices directory), so the
+        question is now asked where the answer lives.
+
+        Synthesised in DEFAULT_LANG, which is Ukrainian, because all event
+        announcement strings in events.py are written in Ukrainian.  Naming the
+        constant rather than repeating the literal "uk" keeps this site in step
+        with the language the rest of the pipeline falls back to, instead of
+        quietly disagreeing with it after a future change.
         """
         LOGGER.info("Announcing system event for %s", message.username)
         await self._synthesize_and_broadcast(
             username=message.username,
             final_text=message.text,
-            voice=self._voice_store.random_voice(),
+            voice=random.choice(self._tts.voice_names),
             lang=DEFAULT_LANG,
             emotes=self._resolve_emotes(message.emote_names, []),
             avatar_url=message.avatar_url,

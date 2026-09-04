@@ -29,12 +29,26 @@ class FakeTTS:
     save_wav must create a real file: _synthesize_and_broadcast unlinks the WAV
     in a finally block, so returning a bare path would fail with
     FileNotFoundError for reasons unrelated to the behaviour under test.
+
+    voice_names is the pool the real engine exposes, and channel-event
+    announcements pick from it at random.  The names here deliberately differ
+    from the pool given to VoiceStore in build_handler below — in the running
+    bot the two are the same list, because the composition root passes
+    tts.voice_names straight into VoiceStore, but keeping them apart in the
+    tests is what lets an assertion tell which of the two objects a voice
+    actually came from.
     """
+
+    VOICE_NAMES: list[str] = ["ENGINE_A", "ENGINE_B"]
 
     def __init__(self, tmp_path: Path) -> None:
         self._tmp_path = tmp_path
         self._counter = 0
         self.calls: list[dict] = []
+
+    @property
+    def voice_names(self) -> list[str]:
+        return list(self.VOICE_NAMES)
 
     def save_wav(self, text: str, *, voice_name: str, lang: str) -> Path:
         self.calls.append({"text": text, "voice_name": voice_name, "lang": lang})
@@ -285,6 +299,58 @@ class TestAnnouncePrefix:
         instance = await build_handler(no_announce_users=frozenset({"alice"}))
         await instance.handle(QueuedMessage(username="Alice", text="hello there"))
         assert fake_tts.spoken_text == "hello there"
+
+    async def test_a_capitalised_no_announce_entry_still_matches(
+        self, build_handler, fake_tts
+    ) -> None:
+        """The handler lower-cases the list itself, so a caller need not.
+
+        config.py happens to lower-case the value it reads from the environment,
+        which used to be the only reason this worked at all.  Anyone building
+        the set another way got a list that silently never matched, because the
+        comparison lower-cases the incoming username but not the entries.  The
+        handler now normalises what it is handed, so both sides agree.
+        """
+        instance = await build_handler(no_announce_users=frozenset({"Alice"}))
+        await instance.handle(QueuedMessage(username="alice", text="hello there"))
+        assert fake_tts.spoken_text == "hello there"
+
+
+class TestVoiceSource:
+    """Which object each kind of message asks for a voice.
+
+    Two different questions look alike here and must not be confused.  A chat
+    message needs the voice this particular chatter has been given and keeps
+    forever, which is VoiceStore's job because it is the thing that writes the
+    answer to disk.  A channel-event announcement (a follow, a raid) needs any
+    voice at all, once, and nothing about the pick is ever stored or read back
+    — so it comes from the TTS engine, which is the object that knows which
+    voices exist.  The fake engine and the store are given different pools
+    precisely so these assertions can tell the two apart.
+    """
+
+    async def test_channel_event_voice_comes_from_the_engine_pool(
+        self, build_handler, fake_tts
+    ) -> None:
+        instance = await build_handler()
+        await instance.handle(
+            QueuedMessage(
+                username="alice", text="alice just followed!", kind=MessageKind.SYSTEM
+            )
+        )
+        assert fake_tts.calls[-1]["voice_name"] in FakeTTS.VOICE_NAMES
+
+    async def test_user_voice_still_comes_from_the_store(
+        self, build_handler, fake_tts
+    ) -> None:
+        """A chat message keeps using the persisted assignment, not the pool.
+
+        build_handler gives VoiceStore the single-voice pool ["M1"], so the
+        assignment it hands out is knowable in advance.
+        """
+        instance = await build_handler()
+        await instance.handle(QueuedMessage(username="alice", text="hello there"))
+        assert fake_tts.calls[-1]["voice_name"] == "M1"
 
 
 class TestDispatch:

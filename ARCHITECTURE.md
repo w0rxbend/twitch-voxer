@@ -177,7 +177,7 @@ sequenceDiagram
     EVT-->>BOT: random funny announcement string (Ukrainian)
     BOT->>MQ: put(QueuedMessage(kind=SYSTEM, text=announcement))
     MQ->>MH: process_queue() dequeues
-    MH->>MH: _handle_system()  ← random voice, no lang detect, no announce window
+    MH->>MH: _handle_system()  ← random voice from the TTS pool, no lang detect, no announce window
     MH->>TTS: save_wav + to_mp3
     MH->>SRV: broadcast(BroadcastEvent)
 ```
@@ -281,4 +281,4 @@ sequenceDiagram
 | data/messages.json reloaded every scheduler cycle | Allows live edits to messages and frequencies without restarting the bot; the DB read is cheap. |
 | Longest abbreviation first in regex alternation | Without longest-first ordering, shorter prefixes (`gg`) would match before longer keys (`ggwp`), producing wrong expansions. |
 | Shared `static/overlay.js` for both overlay pages | `index.html` (full 3D overlay) and `simple.html` (lightweight overlay) differ only visually; the WebSocket handling, audio queueing, and reconnection logic live once in `overlay.js` instead of being duplicated per page. |
-| Built-in voice list owned by `tts.py` | Which voices exist is a fact about the synthesis engine, not about the message pipeline. `TTSService.voice_names` merges the built-ins with any custom voices loaded from `voices/*.json`, so the composition root asks one object for the pool instead of assembling it from a constant in `handler.py` plus a property on the engine. |
+| Built-in voice list owned by `tts.py` | Which voices exist is a fact about the synthesis engine, not about the message pipeline. `TTSService.voice_names` merges the built-ins with any custom voices loaded from `voices/*.json`, so the composition root asks one object for the pool instead of assembling it from a constant in `handler.py` plus a property on the engine. Channel-event announcements pick their throwaway voice from that same property; `VoiceStore` is asked only for a chatter's remembered voice, which is the one thing it actually stores. |
