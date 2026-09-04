@@ -122,6 +122,10 @@ def build_handler(
     Pass `emotes` to give the handler a populated Twitch emote cache; leaving it
     unset keeps the store permanently empty, which is what every test that does
     not care about emote images wants.
+
+    Pass `broadcast_raises` to make delivery to the overlay fail — that is how a
+    real WebSocket fan-out failure is simulated, since the handler only ever sees
+    `broadcast` as an awaitable it calls.
     """
 
     async def _build(
@@ -130,9 +134,12 @@ def build_handler(
         no_announce_users: frozenset[str] | None = None,
         announce_window_secs: int = 300,
         emotes: dict[str, dict[str, str]] | None = None,
+        broadcast_raises: type[BaseException] | None = None,
     ) -> MessageHandler:
         async def capture(event: BroadcastEvent) -> None:
             broadcasts.append(event)
+            if broadcast_raises is not None:
+                raise broadcast_raises("broadcast failed")
 
         instance = MessageHandler(
             tts=fake_tts,
@@ -304,3 +311,67 @@ class TestDispatch:
         assert event.username == "alice"
         assert event.audio_url.startswith("/audio/")
         assert (audio_dir / Path(event.audio_url).name).exists()
+
+
+class TestBroadcastFailureLeavesNoOrphans:
+    """A failed broadcast must not leave an MP3 nobody will ever delete.
+
+    Generated MP3s are deleted by exactly one mechanism: the browser plays the
+    clip and sends {"done": "<name>.mp3"} back over the WebSocket, and the
+    server unlinks it then.  If the broadcast never reaches a browser, that
+    message never arrives, so a file left behind at this point stays in
+    audio_dir until somebody deletes it by hand.  Both paths that produce a
+    clip — real synthesis and the copied notification sound for an emote-only
+    message — are checked, because they used to clean up differently.
+    """
+
+    async def test_synthesis_path_removes_the_mp3(
+        self, build_handler, audio_dir
+    ) -> None:
+        instance = await build_handler(broadcast_raises=RuntimeError)
+
+        with pytest.raises(RuntimeError):
+            await instance.handle(QueuedMessage(username="alice", text="hello there"))
+
+        assert list(audio_dir.iterdir()) == []
+
+    async def test_emote_only_path_removes_the_mp3(
+        self, build_handler, audio_dir, tmp_path
+    ) -> None:
+        sound = tmp_path / "ping.mp3"
+        sound.write_bytes(b"fake-mp3")
+        instance = await build_handler(
+            emote_sound_paths=[str(sound)], broadcast_raises=RuntimeError
+        )
+
+        with pytest.raises(RuntimeError):
+            await instance.handle(QueuedMessage(username="alice", text="🎉"))
+
+        assert list(audio_dir.iterdir()) == []
+        # The copied-from source sound is not the handler's to delete
+        assert sound.exists()
+
+    async def test_a_half_written_copy_is_removed(
+        self, build_handler, audio_dir, tmp_path, monkeypatch
+    ) -> None:
+        """A copy that dies part-way leaves no truncated MP3 behind.
+
+        shutil.copy2 writes the destination incrementally, so a full disk or a
+        cancelled task can leave a file that exists but is unplayable.  The real
+        copy cannot be made to fail on demand, so it is replaced with one that
+        writes a few bytes and then raises, which is the same state on disk.
+        """
+        sound = tmp_path / "ping.mp3"
+        sound.write_bytes(b"fake-mp3")
+
+        def half_write(src, dst) -> None:
+            Path(dst).write_bytes(b"trunc")
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(handler_module.shutil, "copy2", half_write)
+        instance = await build_handler(emote_sound_paths=[str(sound)])
+
+        with pytest.raises(OSError):
+            await instance.handle(QueuedMessage(username="alice", text="🎉"))
+
+        assert list(audio_dir.iterdir()) == []

@@ -18,6 +18,7 @@ import dataclasses
 import json
 import logging
 from pathlib import Path
+from typing import Final
 
 import uvicorn
 from starlette.applications import Starlette
@@ -27,12 +28,18 @@ from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.staticfiles import StaticFiles
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from .models import BroadcastEvent
+from .models import AUDIO_URL_PREFIX, BroadcastEvent
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
 # Static files (HTML, SVG, GLB) are co-located with this module in voxer/static/
 _STATIC_DIR = Path(__file__).parent / "static"
+
+# The only key the browser is allowed to send us: {"done": "<uuid>.mp3"} means
+# playback finished and the file can be deleted.  Named here because this is
+# the whole client-to-server protocol; voxer/static/overlay.js points at this
+# constant, so the two halves of the protocol are findable from each other.
+DONE_FIELD: Final[str] = "done"
 
 
 def resolve_audio_file(audio_dir: Path, filename: str) -> Path | None:
@@ -115,7 +122,7 @@ class AudioServer:
                         # calling .get() on it would crash this client's handler
                         LOGGER.warning("Received non-object WS message: %r", data)
                         continue
-                    if filename := message.get("done"):
+                    if filename := message.get(DONE_FIELD):
                         # Path-traversal guard: only allow deletion of files that are
                         # direct children of audio_dir (no ../ or absolute paths).
                         path = resolve_audio_file(self._audio_dir, filename)
@@ -142,7 +149,7 @@ class AudioServer:
                 # Static files (JS, CSS, GLB model) served from voxer/static/
                 Mount("/static", StaticFiles(directory=_STATIC_DIR)),
                 # Ephemeral MP3 files served directly from audio_dir
-                Mount("/audio", StaticFiles(directory=self._audio_dir)),
+                Mount(AUDIO_URL_PREFIX, StaticFiles(directory=self._audio_dir)),
             ]
         )
 

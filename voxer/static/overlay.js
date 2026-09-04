@@ -167,6 +167,8 @@
     }
 
     // ── Server notification ("done" → server deletes the MP3) ────────────
+    // The "done" key is the entire client→server protocol; the server reads it
+    // as DONE_FIELD in voxer/server.py, which is the one place it is named.
     function notifyDone(audioUrl) {
       var filename = String(audioUrl).split("/").pop();
       if (ws && ws.readyState === WebSocket.OPEN) {

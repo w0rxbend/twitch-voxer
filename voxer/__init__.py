@@ -11,7 +11,7 @@ The package is organised as:
   tts.py       — Supertonic synthesis + ffmpeg MP3 conversion
   events.py    — randomised Ukrainian channel-event announcement strings
   config.py    — environment-variable configuration
-  models.py    — shared dataclasses (QueuedMessage, BroadcastEvent, …)
+  models.py    — shared dataclasses + the helper that builds the /audio URL
 
 Keeping this module import-light means `import voxer.models` (e.g. in tests)
 does not pull in twitchio, uvicorn, or the TTS engine.

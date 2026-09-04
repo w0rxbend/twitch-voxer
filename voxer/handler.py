@@ -39,7 +39,7 @@ from pathlib import Path
 
 from langdetect import detect, LangDetectException
 
-from .models import BroadcastEvent, EmoteItem, MessageKind, QueuedMessage
+from .models import audio_url_for, BroadcastEvent, EmoteItem, MessageKind, QueuedMessage
 from .stores import AnnounceTracker, EmoteStore, VoiceStore
 from .textnorm import (
     DEFAULT_LANG,
@@ -154,6 +154,50 @@ class MessageHandler:
         ]
         return resolved + emoji_items
 
+    def _new_mp3_path(self) -> Path:
+        """Return a fresh, unused path for one clip inside audio_dir.
+
+        The name is a random UUID because several messages can be in flight at
+        once: a name derived from the chatter or the text would collide, and one
+        message would overwrite audio another was still playing.
+        """
+        return self._audio_dir / f"{uuid.uuid4()}.mp3"
+
+    async def _publish(
+        self,
+        mp3_path: Path,
+        *,
+        username: str,
+        avatar_url: str | None,
+        emotes: list[EmoteItem],
+    ) -> None:
+        """Announce a finished MP3 to every connected overlay, or delete it.
+
+        Once this returns, the file's whole future is the browser's: it lives in
+        audio_dir until a client plays it and sends {"done": "<name>.mp3"} back,
+        which is what makes server.py unlink it.  So if the broadcast itself
+        fails, nobody will ever ask for that deletion and the file would sit
+        there forever — hence the unlink on the way out.  BaseException rather
+        than Exception, because a cancelled task must not leak a file either.
+        """
+        event = BroadcastEvent(
+            audio_url=audio_url_for(mp3_path.name),
+            username=username,
+            avatar_url=avatar_url,
+            emotes=emotes,
+        )
+        LOGGER.info(
+            "Broadcasting audio for %s -> %s (emotes: %s)",
+            username,
+            mp3_path.name,
+            [e.name for e in emotes],
+        )
+        try:
+            await self._broadcast(event)
+        except BaseException:
+            mp3_path.unlink(missing_ok=True)
+            raise
+
     async def _synthesize_and_broadcast(
         self,
         *,
@@ -170,17 +214,14 @@ class MessageHandler:
           1. Synthesise WAV via TTSService (runs in a thread — CPU-bound).
           2. Convert WAV → MP3 via ffmpeg (async subprocess).
           3. Delete the temporary WAV file (always, even on ffmpeg error).
-          4. Build a BroadcastEvent and call server.broadcast().
-
-        The MP3 is written to audio_dir with a UUID filename to avoid collisions
-        from concurrent messages.  The browser client deletes it after playback
-        by sending {"done": "filename.mp3"} over WebSocket.
+          4. Hand the finished MP3 to _publish(), which announces it or, if the
+             broadcast fails, deletes it again.
         """
         # Synthesis is synchronous and CPU-bound; run it off the event loop
         wav_path = await asyncio.to_thread(
             self._tts.save_wav, final_text, voice_name=voice, lang=lang
         )
-        mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
+        mp3_path = self._new_mp3_path()
         try:
             await self._tts.to_mp3(wav_path, mp3_path)
         except BaseException:
@@ -192,19 +233,9 @@ class MessageHandler:
             # Always clean up the temporary WAV even if ffmpeg fails
             wav_path.unlink()
 
-        event = BroadcastEvent(
-            audio_url=f"/audio/{mp3_path.name}",
-            username=username,
-            avatar_url=avatar_url,
-            emotes=emotes,
+        await self._publish(
+            mp3_path, username=username, avatar_url=avatar_url, emotes=emotes
         )
-        LOGGER.info(
-            "Broadcasting audio for %s -> %s (emotes: %s)",
-            username,
-            mp3_path.name,
-            [e.name for e in emotes],
-        )
-        await self._broadcast(event)
 
     async def _handle_system(self, message: QueuedMessage) -> None:
         """Synthesise a channel-event announcement directly, bypassing all user checks.
@@ -240,17 +271,22 @@ class MessageHandler:
             return
         sound = random.choice(self._emote_sounds)
         LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
-        mp3_path = self._audio_dir / f"{uuid.uuid4()}.mp3"
+        mp3_path = self._new_mp3_path()
         # Copy rather than move so the source sound file is preserved for reuse.
         # Runs in a thread — file I/O would otherwise block the event loop.
-        await asyncio.to_thread(shutil.copy2, sound, mp3_path)
-        await self._broadcast(
-            BroadcastEvent(
-                audio_url=f"/audio/{mp3_path.name}",
-                username=message.username,
-                avatar_url=message.avatar_url,
-                emotes=emotes,
-            )
+        try:
+            await asyncio.to_thread(shutil.copy2, sound, mp3_path)
+        except BaseException:
+            # copy2 can fail part-way (a full disk, a cancelled task) and leave a
+            # truncated file behind, exactly as a failed ffmpeg run can — clear
+            # it up the same way rather than leaving an unplayable orphan.
+            mp3_path.unlink(missing_ok=True)
+            raise
+        await self._publish(
+            mp3_path,
+            username=message.username,
+            avatar_url=message.avatar_url,
+            emotes=emotes,
         )
 
     async def _handle_user(self, message: QueuedMessage) -> None:
