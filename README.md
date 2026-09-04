@@ -14,7 +14,7 @@ A self-hosted Twitch chat Text-to-Speech bot that streams synthesised audio to a
 git clone https://github.com/your-username/twitch-voxer.git
 cd twitch-voxer
 uv sync
-cp .env.example .env   # fill in your Twitch credentials
+cp .env.example .env   # fill in your Twitch credentials and bot account login
 mkdir -p data
 uv run main.py
 ```
@@ -22,7 +22,7 @@ uv run main.py
 **With Docker:**
 
 ```bash
-cp .env.example .env   # fill in TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET
+cp .env.example .env   # fill in TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and TWITCH_BOT_USERNAME
 mkdir -p data
 docker compose up --build
 # then open the authorization URL printed in the log (one time only)
@@ -188,8 +188,9 @@ The first run downloads the Supertonic TTS model — this may take a minute.
 
 ```bash
 # 1. Fill in your Twitch application credentials.
-#    Only TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are required —
-#    account tokens are obtained automatically on the first start (see below).
+#    TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and TWITCH_BOT_USERNAME are
+#    required — account tokens are obtained automatically on the first
+#    start (see below).
 cp .env.example .env
 
 # 2. Create the data directory (persistent state lives here)
@@ -356,7 +357,7 @@ Every setting is read from the environment (or from a `.env` file in the working
 | `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
 | `VOXER_WS_SEND_TIMEOUT` | `5` | Seconds one overlay client may take to accept a WebSocket message before the server drops it. A paused OBS source or a sleeping laptop keeps its connection open but stops reading it, which would otherwise stall every message behind it |
 | `VOXER_AUDIO_SWEEP_INTERVAL_SECS` | `300` | How often a background task looks for abandoned MP3 files in `VOXER_AUDIO_DIR`. A clip is normally deleted as soon as the overlay reports it finished playing; a browser that crashes or is refreshed mid-clip never sends that report |
-| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | How old an MP3 must be before that sweep deletes it. Do not lower this: a younger file may still be queued for synthesis, on its way to the browser, or playing right now |
+| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | How old an MP3 must be before that sweep deletes it. A clip the overlay has been sent but has not reported as played is never swept whatever its age, so this only ever applies to files nobody is waiting for. Do not lower it: a younger file may still be queued for synthesis or on its way to the browser |
 | `VOXER_SCHEDULER_EMPTY_RETRY_DELAY` | `600` | Delay before re-checking when the scheduled-message list is empty (`VOXER_SCHEDULER_INTERVAL` is a deprecated alias) |
 | `VOXER_SCHEDULER_INITIAL_DELAY` | `10` | Seconds to wait before the first scheduled message |
 | `VOXER_MESSAGE_QUEUE_MAXSIZE` | `20` | How many messages may wait for speech synthesis at once. Synthesis takes seconds per message, so this bound keeps the overlay from falling minutes behind a busy chat: once the queue is full, new chat messages are dropped (and logged), while channel events wait for room. |

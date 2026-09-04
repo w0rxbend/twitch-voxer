@@ -25,3 +25,13 @@ data/tokens.tmp
 # Coverage output
 .coverage
 htmlcov/
+
+# Live runtime state, written by the bot while it runs: voices.json records
+# which voice each viewer was assigned and timestamps.json when each of them
+# last triggered an announcement.  Both contain real viewer logins from
+# whatever channel the bot ran in, and both change on almost every message, so
+# tracking them means committing other people's names and a permanent stream of
+# diff noise.  The .example files beside them show the shape a fresh install
+# starts from; the bot creates the real files itself on first run.
+data/voices.json
+data/timestamps.json

@@ -1,7 +1,8 @@
 # One-command deployment: `docker compose up -d --build`
 #
-# Requires a `.env` file next to this compose file (copy .env.example).  Only
-# TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are needed — on the first
+# Requires a `.env` file next to this compose file (copy .env.example).
+# TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and TWITCH_BOT_USERNAME are needed
+# (the bot refuses to start without all three) — on the first
 # `docker compose up` the bot logs an authorization URL; open it once in a
 # browser to sign in with the bot account.  The resulting tokens are saved
 # under ./data and survive restarts, so this is a one-time step.

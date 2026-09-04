@@ -562,7 +562,11 @@ class VoxBot(commands.AutoBot):
 
         Used by the Scheduler to post scheduled community messages.
         Creates a PartialUser from the bot's own ID so no broadcaster token
-        is needed — only the bot's chat:edit scope.
+        is needed — only the bot's user:write:chat scope, which is the one
+        Helix requires for POST /chat/messages and the one OAUTH_SCOPES above
+        actually asks for.  (chat:edit is the legacy IRC scope and is not
+        requested anywhere in this project; naming it here would mislead
+        anyone trimming the scope list down to the minimum.)
 
         Args:
             text: Message to send (max 500 chars enforced by Twitch API).
