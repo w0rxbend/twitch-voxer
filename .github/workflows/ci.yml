@@ -27,7 +27,7 @@ jobs:
       # here means CI resolves dependencies from uv.lock, the exact versions
       # a developer gets, rather than whatever pip would pick today.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
 
