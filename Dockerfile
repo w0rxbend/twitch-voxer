@@ -8,7 +8,7 @@ FROM python:3.14-slim-bookworm AS builder
 
 # uv is a fast Python package installer; pin the major/minor version so
 # builds stay reproducible.
-COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /usr/local/bin/uv
 
 # UV_COMPILE_BYTECODE: pre-compile .pyc files so container startup is faster.
 # UV_LINK_MODE=copy: copy files instead of hardlinking (hardlinks don't work
