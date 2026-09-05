@@ -4,7 +4,8 @@
 # TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and TWITCH_BOT_USERNAME are needed
 # (the bot refuses to start without all three) — on the first
 # `docker compose up` the bot logs an authorization URL; open it once in a
-# browser to sign in with the bot account.  The resulting tokens are saved
+# browser to sign in with the channel account named by TWITCH_BOT_USERNAME.
+# This same account selects the channel Voxer reads. The tokens are saved
 # under ./data and survive restarts, so this is a one-time step.
 #
 # Before the FIRST `docker compose up`, create the state directory yourself:

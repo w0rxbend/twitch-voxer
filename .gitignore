@@ -15,7 +15,9 @@ wheels/
 
 .tio.tokens.json
 data/audio/
+audio/*.mp3
 emotes/emotes.db
+emotes/all_emotes.json
 
 # Live OAuth credentials for the bot account. twitchio rewrites these roughly
 # hourly, so without this rule a "git add -A" after any run publishes them.

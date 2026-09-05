@@ -1,479 +1,303 @@
-# twitch-voxer
+<p align="center">
+  <img src="assets/logo.png" alt="Voxer — a stencil raven wearing a broadcast headset" width="210">
+</p>
 
-![twitch-voxer logo](logo.svg)
+<h1 align="center">VOXER</h1>
 
-A self-hosted Twitch chat Text-to-Speech bot that streams synthesised audio to an OBS browser source via WebSocket. Every chat message is announced in the detected language, each chatter is automatically assigned a persistent voice, bots and links are handled gracefully, and a scheduler posts random weighted community messages to chat.
+<p align="center"><strong>Your chat has something to say. Let it.</strong></p>
+<p align="center">Self-hosted Twitch text-to-speech with a voice for every chatter and overlays made for OBS.</p>
 
----
+<p align="center">
+  <a href="#quick-start">🚀 Quick start</a> ·
+  <a href="#docker">🐳 Docker</a> ·
+  <a href="#obs">🎬 OBS setup</a> ·
+  <a href="#configuration">⚙️ Configuration</a> ·
+  <a href="#troubleshooting">🛠️ Help</a>
+</p>
 
-## Running
+<p align="center">
+  <img src="assets/banner.png" alt="VOXER — Twitch chat. Out loud. Black stencil raven and distressed lettering on an ivory background." width="100%">
+</p>
 
-**Locally** (requires Python ≥ 3.14, uv, and ffmpeg):
+<h2 align="center">🎙️ Give Chat a Voice</h2>
+
+Keep your eyes on the game and your ears on chat. Voxer turns Twitch messages into speech on your machine, then plays them through a transparent OBS browser source. Each chatter gets a persistent voice, so your regulars sound like your regulars.
+
+| What you get | What it does |
+| :--- | :--- |
+| 🗣️ Distinct voices | Ten built-in voices plus bundled custom styles, with assignments saved between streams. |
+| 🌍 English & Ukrainian | Automatic language detection, spoken usernames, expanded abbreviations, and readable link announcements. Other languages fall back to Ukrainian. |
+| 🎉 Channel moments | Spoken follow, subscription, cheer, and raid announcements. Event announcement text is Ukrainian. |
+| 🎬 Two overlay styles | A 3D speaker with glitch effects, or a lighter particle overlay. Both show the current chatter and support reduced motion. |
+| 💬 Community reminders | Editable, weighted scheduled messages posted directly to chat. |
+| 🏠 Your own setup | Local [Supertonic](https://pypi.org/project/supertonic/) speech synthesis, saved settings, and automatic Twitch token refresh. No external TTS API key. |
+
+**One account, one channel:** Voxer runs in the channel owned by `TWITCH_BOT_USERNAME`. Use your streaming account's lowercase login and authorize that same account. Messages sent by that account are skipped, along with known bots and usernames containing `bot`.
+
+<a name="quick-start"></a>
+<h2 align="center">🚀 Quick Start</h2>
+
+For a local install, you'll need [uv](https://docs.astral.sh/uv/getting-started/installation/), Python **3.14**, and **ffmpeg**. uv can [install Python for you](https://docs.astral.sh/uv/guides/install-python/). Install ffmpeg with your package manager, such as `sudo apt install ffmpeg` on Ubuntu or `brew install ffmpeg` on macOS.
+
+Prefer containers? Create your Twitch application below, then jump to [Docker](#docker).
+
+<h3 align="center">1 · Connect your Twitch account</h3>
+
+1. Open the [Twitch Developer Console](https://dev.twitch.tv/console/apps) and register an application. Twitch requires a verified email and two-factor authentication; see its [registration guide](https://dev.twitch.tv/docs/authentication/register-app/).
+2. Set the OAuth redirect URL to **`http://localhost:4343/oauth/callback`**.
+3. Open **Manage** for your application. Copy the **Client ID** and create a **Client Secret**.
+
+<h3 align="center">2 · Install and configure</h3>
 
 ```bash
-git clone https://github.com/your-username/twitch-voxer.git
+git clone https://github.com/w0rxbend/twitch-voxer.git
 cd twitch-voxer
-uv sync
-cp .env.example .env   # fill in your Twitch credentials and bot account login
+uv python install 3.14
+uv sync --locked
+cp .env.example .env
 mkdir -p data
-uv run main.py
 ```
 
-**With Docker:**
-
-```bash
-cp .env.example .env   # fill in TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and TWITCH_BOT_USERNAME
-mkdir -p data
-docker compose up --build
-# then open the authorization URL printed in the log (one time only)
-```
-
-The server starts on `http://localhost:8080`. Add that URL as an OBS browser source — TTS audio plays there automatically.
-
-Local runs now bind to `127.0.0.1` by default. Docker and other network
-listeners require `VOXER_OVERLAY_TOKEN`. Generate a separate secret with
-`python3 -c "import secrets; print(secrets.token_urlsafe(32))"` and put the
-result in `.env`. Use `http://localhost:8080/?token=YOUR_TOKEN` or
-`http://localhost:8080/simple?token=YOUR_TOKEN` as the OBS source URL. The
-server exchanges the token for an HttpOnly cookie and redirects without the
-query token. Keep the token in the configured OBS URL for fresh browser profiles.
-
-Docker publishes both ports on localhost only. See [Security and deployment](SECURITY.md)
-for allowed hosts and TLS reverse proxies. See [Feature roadmap](ROADMAP.md)
-for proposed next features. Never use a Twitch token as the overlay credential.
-
-> First run downloads the Supertonic TTS model and may take a minute.
-
-See [Getting Twitch Credentials](#getting-twitch-credentials) if you haven't created a Twitch application yet.
-
----
-
-## Features
-
-- **TTS for every chatter** — powered by [Supertonic](https://github.com/supertonic-ai/supertonic); ten built-in voices (M1–M5, F1–F5) plus optional custom voices from the `voices/` directory.
-- **Persistent voice assignment** — each Twitch username keeps the same randomly-assigned voice across sessions (stored in an atomically written local JSON file).
-- **Language detection** — automatically detects Ukrainian (`uk`) and English (`en`); defaults to Ukrainian. Announcements are phrased in the detected language.
-- **Message normalisation**
-  - URLs are replaced with a spoken phrase (*"see link in the chat"* / *"дивіться посилання в чаті"*).
-  - Common abbreviations are expanded (`wtf` → *"what the f"*, `asap` → *"as soon as possible"*, `гг` → *"гарна гра"*, `хз` → *"хто зна"*, and many more — language-aware).
-  - Laugh expressions (`lol`, `kek`, `хаха`, `азаз`, …) are converted to the TTS `<laugh>` expression tag.
-- **Bot filtering** — well-known bot accounts (StreamElements, Nightbot, Moobot, …) and any username containing "bot" are silently skipped.
-- **WebSocket audio streaming** — MP3 clips are delivered to authenticated overlays. Each recipient owns its playback acknowledgement; files remain until all recipients finish, disconnect, or expire.
-- **OBS browser source** — the built-in transparent page auto-connects, queues audio, and plays it sequentially with exponential-backoff reconnection (no user interaction required; OBS CEF bypasses autoplay restrictions).
-- **Scheduled messages** — posts random weighted messages to chat. Messages and per-hour frequencies are read from `data/messages.json` at runtime — no restart needed to add or remove entries.
-- **Colourful logging** — structured, colour-coded terminal output via `colorlog`.
-- **Bounded processing** — per-user cooldowns, stale-message expiry, text limits, bounded playback queues, and offline synthesis suppression control overload.
-- **Local overlay assets** — pinned graphics libraries are bundled with their licenses; playback does not execute JavaScript from third-party CDNs.
-
----
-
-## Architecture
-
-```
-Twitch EventSub
-      │
-      ▼
-   VoxBot          (twitchio AutoBot — Twitch adapter)
-      │
-      ▼
-MessageHandler     (business logic: lang detect, voice assign, normalise)
-      │
-      ▼
-  TTSService       (Supertonic WAV synthesis → ffmpeg MP3 conversion)
-      │
-      ▼
- AudioServer       (Starlette: HTTP static files + WebSocket broadcast)
-      │  ws://
-      ▼
-OBS Browser Source (transparent page, sequential audio queue)
-
-Scheduler ──────► Twitch chat (periodic community messages, no TTS)
-```
-
----
-
-## Prerequisites
-
-| Tool | Version | Notes |
-|------|---------|-------|
-| Python | ≥ 3.14 | |
-| [uv](https://docs.astral.sh/uv/getting-started/installation/) | latest | dependency & venv management |
-| ffmpeg | any | WAV → MP3 conversion (`apt install ffmpeg` / `brew install ffmpeg`) |
-| Twitch application | — | see [Getting credentials](#getting-twitch-credentials) |
-
----
-
-## Getting Twitch Credentials
-
-You need exactly two values: a **Client ID** and a **Client Secret**. Both come from a Twitch *application* — an entry you register once in Twitch's developer console that identifies this bot to Twitch. Register it under the **bot account** (the Twitch account that will post messages in chat).
-
-Account tokens are **not** something you copy anywhere. The bot obtains them for you, once, through OAuth — the standard "sign in with Twitch and approve this app" flow you have seen on other sites — and stores them locally after that.
-
-### 1. Register a Twitch application
-
-1. Log in to the [Twitch Dev Console](https://dev.twitch.tv/console/apps) with your **bot account**.
-2. Click **Register Your Application**.
-3. Fill in:
-   - **Name** — anything (e.g. `my-voxer-bot`)
-   - **OAuth Redirect URLs** — `http://localhost:4343/oauth/callback`
-     (this must match exactly — it is where Twitch sends the browser back after you approve the app, and the bot listens on port 4343 for it)
-   - **Category** — *Chat Bot*
-4. Click **Create**, then **Manage**.
-5. Copy the **Client ID** and generate + copy the **Client Secret**.
-
-Put both values in your `.env` file as `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET`.
-
-### 2. First-run authorization (automatic)
-
-Start the bot (`uv run main.py` or `docker compose up`). On the first start there are no account tokens yet, so the bot runs a small one-time authorization server on port **4343** and opens `http://localhost:4343/oauth` in your browser (if it cannot open a browser — for example inside Docker — it prints that URL in the log; open it yourself). Sign in as the **bot account** and approve the application.
-
-That is the whole procedure. The bot saves the resulting tokens to `data/tokens.json` (configurable via `VOXER_TOKEN_FILE`), refreshes them automatically whenever they expire, and re-saves them on every refresh — so you are never asked to authorize again, even across restarts.
-
-The scopes (permissions) requested during authorization are defined in `voxer/bot.py` (`OAUTH_SCOPES`): reading and writing chat, plus follow, subscription, cheer, and raid events.
-
-If you already have a valid access/refresh token pair from an external tool, you can put it in `TWITCH_ACCESS_TOKEN` / `TWITCH_REFRESH_TOKEN` to seed the token file and skip the browser step entirely — but normally you leave those empty.
-
-`voxer/fetch_emotes.py` (the emote-image downloader) reuses the same token file: it refreshes the stored token and writes the rotated pair back, falling back to the env token or its own browser flow only when the file has nothing usable.
-
----
-
-## Quick Start — Local
-
-### 1. Clone and install dependencies
-
-```bash
-git clone https://github.com/your-username/twitch-voxer.git
-cd twitch-voxer
-uv sync
-```
-
-### 2. Create the environment file
-
-```bash
-cp .env.example .env   # or create .env from scratch — see Configuration Reference below
-```
-
-Minimal `.env`:
+Fill in these three values in `.env`:
 
 ```dotenv
-TWITCH_CLIENT_ID=your_client_id_here
-TWITCH_CLIENT_SECRET=your_client_secret_here
-TWITCH_BOT_USERNAME=your_bot_account_login
+TWITCH_CLIENT_ID=your_client_id
+TWITCH_CLIENT_SECRET=your_client_secret
+TWITCH_BOT_USERNAME=your_channel_login
 ```
 
-Account tokens are not part of the configuration — the first run walks you through a one-time browser authorization and stores them in `data/tokens.json` (see [Getting Twitch Credentials](#getting-twitch-credentials)).
+Leave the access and refresh token fields empty for the normal browser sign-in flow. Keep `.env` and `data/tokens.json` private.
 
-### 3. Prepare the data files
-
-`voices.json` is created automatically on first run.
-
-Create `data/messages.json` with the messages the scheduler will randomly post:
+**Before you start:** review [data/messages.json](data/messages.json). Its messages are posted to your chat, beginning after the startup delay. To disable reminders, replace its contents with:
 
 ```json
-{
-  "messages": [
-    {
-      "text": "Welcome to the stream! 👋",
-      "frequency_per_hour": 1
-    },
-    {
-      "text": "Time for a stretch break.",
-      "frequency_per_hour": 0.5
-    }
-  ]
-}
+{"messages": []}
 ```
 
-### 4. Run
+<h3 align="center">3 · Go live with Voxer</h3>
 
 ```bash
-uv run main.py
+uv run --frozen twitch-voxer
 ```
 
-The server binds to `127.0.0.1:8080`. Open `http://localhost:8080` in a browser (or add it as an OBS browser source) to receive TTS audio. Include an overlay token when configured, as described above.
+Open the authorization URL shown in the terminal, usually **`http://localhost:4343/oauth`**, and sign in as the account configured above. Saved tokens are refreshed automatically and survive restarts; you may need to authorize again if access is revoked.
 
-The first run downloads the Supertonic TTS model — this may take a minute.
+The first run downloads the speech model. Once startup completes, add **`http://localhost:8080/simple`** as an OBS browser source using the [setup below](#obs). Keep an overlay connected and send a message from another Twitch account to hear it speak.
 
----
+<a name="docker"></a>
+<h2 align="center">🐳 Run with Docker</h2>
 
-## Docker
+Docker includes Python and ffmpeg. Clone the repository, enter its directory, copy `.env.example` to `.env`, and fill in the same three Twitch settings from [Quick Start](#quick-start).
 
-### Build and run with docker-compose
+Generate a separate overlay secret:
 
 ```bash
-# 1. Fill in your Twitch application credentials.
-#    TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET and TWITCH_BOT_USERNAME are
-#    required — account tokens are obtained automatically on the first
-#    start (see below).
-cp .env.example .env
+docker run --rm python:3.14-slim python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
-# 2. Create the data directory (persistent state lives here)
+Paste the result into `.env` as `VOXER_OVERLAY_TOKEN`. This is required by the container configuration; use a fresh secret, separate from your Twitch credentials.
+
+```dotenv
+VOXER_OVERLAY_TOKEN=paste_the_generated_value_here
+```
+
+Review or disable the scheduled messages as described above, then start the service:
+
+```bash
 mkdir -p data
-
-# 3. Build and start
-docker compose up --build
+docker compose up -d --build
+docker compose logs -f voxer
 ```
 
-### First-run authorization
+On Linux, `data/` must be writable by the container's user, **UID 1000**. Open the authorization URL from the logs on the Docker host and approve your Twitch account. Use **`http://localhost:8080/simple?token=YOUR_TOKEN`** in OBS.
 
-The bot needs permission to act as your bot account. On the first start it has
-no tokens yet, so it launches a small one-time authorization server on port
-**4343** and prints a URL like `http://localhost:4343/oauth` in its log. Open
-that URL once in a browser, sign in with the bot account, and approve the
-application. Two things must line up for this to work:
+The supplied Compose configuration publishes ports **8080** and **4343** on localhost only. Your settings and tokens persist in `./data`; the downloaded model persists in a named Docker volume. Custom voice files and emote sounds are bundled in the image. Uncomment the corresponding mounts in [docker-compose.yml](docker-compose.yml) to use your own local copies.
 
-- In the [Twitch dev console](https://dev.twitch.tv/console/apps), your
-  application's OAuth redirect URL must be set to
-  `http://localhost:4343/oauth/callback`.
-- Port 4343 must be reachable from your browser — the compose file already
-  publishes it.
+| Task | Command |
+| :--- | :--- |
+| View logs | `docker compose logs -f voxer` |
+| Stop | `docker compose down` |
+| Apply `.env` changes | `docker compose up -d --force-recreate` |
+| Update | `git pull --ff-only`, then `docker compose up -d --build` |
 
-The tokens are then saved to `./data/tokens.json`, refreshed automatically,
-and reused on every later start — you will not be asked again.
+<a name="obs"></a>
+<h2 align="center">🎬 Add It to OBS</h2>
 
-### What the container looks like
+| Overlay | Local URL | Style |
+| :--- | :--- | :--- |
+| **Full** | `http://localhost:8080/` | 3D speaker, glitches, and emote effects. |
+| **Simple** | `http://localhost:8080/simple` | Chatter card and particles with less graphics work. |
 
-The image bundles the default voice styles (`voices/`) and emote sounds
-(`emotes/`), so an image pulled from a registry works on its own, without a
-checkout of this repository. If you want to customize them, uncomment the
-`./voices` and `./emotes` bind mounts in `docker-compose.yml` to use your
-local copies instead.
+1. In OBS, add a [Browser Source](https://obsproject.com/kb/browser-source).
+2. Paste an overlay URL. If you configured an overlay token, append `?token=YOUR_TOKEN`.
+3. Match the source dimensions to your canvas, for example **1920 × 1080**. The background is transparent.
+4. Disable **Shutdown source when not visible** to keep the connection alive while switching scenes.
+5. Send a chat message from another account and check the audio in OBS.
 
-The compose file mounts `./data` to `/data` inside the container (voice
-assignments, scheduled messages, generated audio, and the OAuth tokens all
-persist there between restarts) and uses a named Docker volume for the
-Supertonic model cache so it survives container rebuilds.
+At least one overlay must be connected for speech to be generated. Opening both overlays plays audio in both, so use one active audio source if you hear an echo.
 
-```yaml
-# Paths set by docker-compose.yml
-VOXER_DB_PATH:       /data/voices.json
-VOXER_MESSAGES_PATH: /data/messages.json
-VOXER_AUDIO_DIR:     /data/audio
-VOXER_TOKEN_FILE:    /data/tokens.json
+<h3 align="center">Make it yours</h3>
+
+| URL option | Example | Effect |
+| :--- | :--- | :--- |
+| `volume` | `?volume=0.7` | Playback volume from `0` to `1`; default `1`. |
+| `debug` | `?debug=1` | Show connection status; `0` hides it. Hidden in OBS by default. |
+| `token` | `?token=YOUR_TOKEN` | Sign in to a protected overlay. |
+
+Combine options with `&`, for example:
+
+```text
+http://localhost:8080/simple?token=YOUR_TOKEN&volume=0.7&debug=0
 ```
 
-The container exposes port **8080** (overlay web server) and port **4343**
-(the one-time authorization flow described above).
+The token is exchanged for a private browser cookie and removed from the address bar. Keep it in the saved OBS source URL so a fresh browser profile can sign in. Update that URL when you rotate the token.
 
-### Multi-architecture builds (amd64 + arm64)
+In a regular browser, click **Enable Audio** or focus it and press Enter/Space if autoplay is blocked. Both overlays follow your system's reduced-motion preference while keeping speech and the chatter card available.
 
-The image builds for both `linux/amd64` and `linux/arm64` (e.g. Raspberry Pi 4/5,
-AWS Graviton, Apple Silicon servers). On an x86_64 host, arm64 builds run under
-QEMU emulation, which needs a one-time setup:
+<a name="configuration"></a>
+<h2 align="center">⚙️ Tune Your Stream</h2>
 
-```bash
-# 1. Register the arm64 emulator with the kernel (one-time, survives reboots
-#    until the next kernel update)
-docker run --privileged --rm tonistiigi/binfmt --install arm64
+Settings come from the environment or `.env`. Restart Voxer after changing them. [`.env.example`](.env.example) contains the full list with explanations; these are the settings you'll most often want to adjust:
 
-# 2. Create a builder that can produce multi-platform images (one-time)
-docker buildx create --name multiarch --driver docker-container
-```
+| Setting | Default | What it changes |
+| :--- | :--- | :--- |
+| `VOXER_MESSAGE_QUEUE_MAXSIZE` | `20` | Messages waiting for speech. New messages are dropped when full. |
+| `VOXER_MAX_MESSAGE_AGE_SECS` | `60` | Maximum age of queued work, in seconds. |
+| `VOXER_USER_COOLDOWN_SECS` | `2` | Minimum gap between accepted messages from one chatter; `0` disables it. |
+| `VOXER_MAX_MESSAGE_CHARS` | `500` | Incoming message length limit. |
+| `VOXER_MAX_SPEECH_CHARS` | `1000` | Length limit after text expansion. |
+| `VOXER_ANNOUNCE_WINDOW_SECS` | `300` | Silence before a chatter's name is spoken again. |
+| `VOXER_NO_ANNOUNCE_USERS` | Configured account | Comma-separated logins whose name prefix is skipped. Replaces the default list. |
+| `VOXER_EMOTE_SOUND_PATHS` | Two bundled MP3s | Sounds for emote-only messages. An empty value disables them. |
+| `VOXER_LOG_LEVEL` | `INFO` | Logging detail. |
 
-Then either build both architectures at once via the platforms already declared
-in `docker-compose.yml` (add `--push` to publish to a registry — the local
-Docker store cannot hold a two-architecture image without containerd):
+<h3 align="center">💬 Scheduled messages</h3>
 
-```bash
-docker buildx bake --builder multiarch
-```
-
-Or build only the arm64 image and load it into the local Docker store:
-
-```bash
-docker buildx build --platform linux/arm64 -t twitch-voxer:arm64 --load .
-```
-
-Emulated arm64 builds are noticeably slower than native ones — expect several
-minutes for the dependency-install step.
-
----
-
-## OBS Browser Source Setup
-
-Two overlay pages are served; both play the same audio and show the same
-"now playing" card (avatar, username, and the message's emotes) — they differ
-only in visual style:
-
-- `http://localhost:8080/` — the full overlay: 3D speaker model, glitch
-  effects, and emotes bursting from the center of the screen.
-- `http://localhost:8080/simple` — a lighter overlay: no 3D scene, only emote
-  particle effects (rain, sparks, and similar). Use this one if the full
-  overlay costs too much GPU on your streaming machine.
-
-Setup:
-
-1. In OBS, add a **Browser Source**.
-2. Set the URL to `http://localhost:8080` or `http://localhost:8080/simple`
-   (replace `localhost` with the server's IP if the bot runs on another
-   machine).
-3. Set width/height to your canvas size (e.g. 1920×1080) — the page
-   background is fully transparent, so it overlays your scene.
-4. Disable **"Shutdown source when not visible"** so the WebSocket stays
-   connected while switching scenes.
-5. Done. Audio plays automatically; OBS's built-in Chromium browser does not
-   enforce the autoplay policy.
-
-### URL parameters
-
-Both pages accept optional query parameters — extra settings appended to the
-URL after a `?`:
-
-| Parameter | Example | Effect |
-|-----------|---------|--------|
-| `volume` | `http://localhost:8080/?volume=0.5` | Playback volume from `0` (silent) to `1` (full, the default). Values outside that range are clamped. |
-| `debug` | `http://localhost:8080/?debug=1` | `debug=1` forces the connection status pill visible; `debug=0` forces it hidden. |
-
-Parameters combine with `&`: `http://localhost:8080/simple?volume=0.7&debug=1`.
-
-### Status pill
-
-A small pill in the top-left corner shows the connection state ("connected",
-"reconnecting in Ns" after a dropped connection) and, when messages arrive
-faster than they can be spoken, the current queue depth. The pill hides
-itself automatically inside OBS so it never appears on stream — it is only
-shown when you open the page in a regular browser, and `?debug=` overrides
-this in either direction (see the table above).
-
-### Testing in a regular browser
-
-Regular browsers (unlike OBS) block audio until you interact with the page —
-this is the browser's autoplay policy, a protection against sites that play
-sound uninvited. When that happens the overlay focuses an **Enable Audio**
-button. Click it or press Enter/Space to retry playback. Pending audio remains
-subject to the queue capacity and age limits while it waits for interaction.
-
-Both pages honor the operating system's reduced-motion preference: speech and
-the now-playing card remain available while decorative animation stops. Changes
-to that preference take effect during playback. Returning through browser
-Back/Forward reconnects the overlay with fresh playback ownership.
-
----
-
-## Configuration Reference
-
-Every setting is read from the environment (or from a `.env` file in the working directory) at startup. [`.env.example`](.env.example) is the authoritative list: it ships with every variable, its default, and a comment explaining when you would change it, so if this table and that file ever disagree, believe the file.
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TWITCH_CLIENT_ID` | *(required)* | Twitch application Client ID |
-| `TWITCH_CLIENT_SECRET` | *(required)* | Twitch application Client Secret |
-| `TWITCH_ACCESS_TOKEN` | *(empty)* | Optional seed token — used once to populate the token file when it does not exist yet, skipping the browser flow. Normally leave empty. |
-| `TWITCH_REFRESH_TOKEN` | *(empty)* | Optional seed refresh token, paired with `TWITCH_ACCESS_TOKEN` |
-| `TWITCH_BOT_USERNAME` | *(required)* | Login name of the bot Twitch account. No default — the bot runs as whichever account this names, so a wrong value fails silently rather than loudly |
-| `VOXER_OAUTH_HOST` | `localhost` | Host the one-time OAuth authorization server binds to (`0.0.0.0` in Docker so the published port reaches it) |
-| `VOXER_OAUTH_PORT` | `4343` | Port of the OAuth authorization server — must match the redirect URL registered in the Twitch dev console |
-| `VOXER_OAUTH_REDIRECT_URL` | `http://localhost:4343/oauth/callback` | The full OAuth Redirect URL — must match exactly what is registered in the Twitch dev console; set an `https://` URL for reverse-proxy setups (non-localhost hosts must be `https://`; validated at startup) |
-| `VOXER_TOKEN_FILE` | `data/tokens.json` | Where obtained OAuth tokens are persisted and auto-refreshed |
-| `VOXER_DB_PATH` | `data/voices.json` | Path to the JSON file storing username → voice mappings |
-| `VOXER_TIMESTAMPS_DB_PATH` | `data/timestamps.json` | Path to the JSON file storing when each chatter last spoke — the record the announce window below is measured against |
-| `VOXER_MESSAGES_PATH` | `data/messages.json` | Path to the scheduled messages file |
-| `VOXER_EMOTES_DB_PATH` | `emotes/emotes.db` | Path to the JSON file of emote name → image URLs. Written by `uv run voxer-fetch-emotes` and read once at startup; if you change this, the fetcher and the bot both follow it |
-| `VOXER_VOICES_DIR` | `voices` | Directory scanned for custom voice `*.json` files. Each file's name (without the extension) becomes a voice on top of the ten built-in ones; a directory that does not exist is reported in the log rather than ignored |
-| `VOXER_AUDIO_DIR` | `audio` | Directory where MP3 files are temporarily stored |
-| `VOXER_SERVER_HOST` | `127.0.0.1` | Bind address; a non-loopback listener requires an overlay token |
-| `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
-| `VOXER_WS_SEND_TIMEOUT` | `5` | Seconds one overlay client may take to accept a WebSocket message before the server drops it. A paused OBS source or a sleeping laptop keeps its connection open but stops reading it, which would otherwise stall every message behind it |
-| `VOXER_AUDIO_SWEEP_INTERVAL_SECS` | `300` | How often a background task looks for abandoned MP3 files in `VOXER_AUDIO_DIR`. A clip is normally deleted as soon as the overlay reports it finished playing; a browser that crashes or is refreshed mid-clip never sends that report |
-| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | Hard lifetime of outstanding playback receipts, checked during broadcasts and sweeps. Also sets the age threshold for orphaned MP3 cleanup. Allow enough time for queued playback. |
-| `VOXER_SCHEDULER_EMPTY_RETRY_DELAY` | `600` | Delay before re-checking when the scheduled-message list is empty (`VOXER_SCHEDULER_INTERVAL` is a deprecated alias) |
-| `VOXER_SCHEDULER_INITIAL_DELAY` | `10` | Seconds to wait before the first scheduled message |
-| `VOXER_MESSAGE_QUEUE_MAXSIZE` | `20` | How many messages may wait for speech synthesis. New chat messages and channel events are dropped when the queue is full. |
-| `VOXER_ANNOUNCE_WINDOW_SECS` | `300` | Seconds of silence from a chatter before their name is spoken again as a "username says:" prefix. Within the window their messages are read out on their own |
-| `VOXER_NO_ANNOUNCE_USERS` | the value of `TWITCH_BOT_USERNAME` | Comma-separated logins that never get the "username says:" prefix (case-insensitive). Setting it **replaces** the default rather than adding to it, so include the bot's own login if you set it |
-| `VOXER_EMOTE_SOUND_PATHS` | `emotes/slack-message.mp3,emotes/discord.mp3` | Comma-separated MP3 files, one picked at random, played for a message that has no speakable text (only emotes or emoji). An empty list means such messages are skipped |
-| `VOXER_LOG_LEVEL` | `INFO` | Root log level: `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. An unrecognised name is reported on stderr and falls back to `INFO` rather than stopping the bot |
-
----
-
-## Scheduled Messages
-
-Edit `data/messages.json` at any time — the scheduler reloads the file on every cycle without requiring a restart:
+Edit [data/messages.json](data/messages.json) to choose your community reminders:
 
 ```json
 {
   "messages": [
-    {
-      "text": "First message",
-      "frequency_per_hour": 1
-    },
-    {
-      "text": "Stretch and drink water.",
-      "frequency_per_hour": 0.5
-    }
+    {"text": "Welcome in! Make yourself at home. 👋", "frequency_per_hour": 1},
+    {"text": "Hydration check. Take a sip! 💧", "frequency_per_hour": 0.5}
   ]
 }
 ```
 
-Messages are posted to chat randomly, weighted by `frequency_per_hour`. A value of `1` means roughly once per hour; `0.5` means roughly once every two hours. They are **not** read aloud via TTS — only sent as chat text.
+Voxer chooses messages randomly, weighted by `frequency_per_hour`. These values set an approximate average, rather than an exact timetable. Reminders are posted as chat text and are not spoken aloud. The file reloads each cycle, so edits do not require a restart.
 
----
+Use `{"messages": []}` to disable posting. `VOXER_SCHEDULER_INITIAL_DELAY` defaults to **10 seconds**; an empty list is checked again after `VOXER_SCHEDULER_EMPTY_RETRY_DELAY`, default **600 seconds**.
 
-## Voice Assignment
+<h3 align="center">🎭 Voices and emotes</h3>
 
-On their first message, each chatter is randomly assigned a voice from the pool: the ten built-in Supertonic voices `M1`–`M5` (male) and `F1`–`F5` (female), plus any custom voices found as `*.json` files in the `voices/` directory. The assignment is persisted in `data/voices.json` and reused for every subsequent message from that chatter. If a stored voice disappears from the pool (for example, a custom voice file was deleted), that chatter is quietly given a new one.
+Each new chatter receives a random voice from **M1–M5**, **F1–F5**, and the custom styles in [voices/](voices/). Assignments are saved in `data/voices.json`. Add compatible Supertonic voice-style JSON files to `voices/` and restart to expand the pool.
 
----
-
-## Project Structure
-
-```
-twitch-voxer/
-├── main.py                  # Entrypoint (calls voxer.app.main)
-├── voxer/
-│   ├── __init__.py          # Package docstring + __version__ (import-light)
-│   ├── app.py               # Composition root — wires everything together, owns shutdown signals
-│   ├── config.py            # Environment variable loading
-│   ├── bot.py               # Twitch adapter (twitchio AutoBot + EventSub + OAuth flow)
-│   ├── handler.py           # Pipeline orchestration (message → audio)
-│   ├── textnorm.py          # Pure text rules (bot filter, emoji, normalisation, abbrevs)
-│   ├── stores.py            # pickledb persistence (VoiceStore, AnnounceTracker, EmoteStore)
-│   ├── models.py            # Shared dataclasses + the helper that builds the /audio URL
-│   ├── tts.py               # TTS infrastructure (Supertonic WAV + ffmpeg MP3)
-│   ├── fetch_emotes.py      # One-shot emote-cache builder (VOXER_EMOTES_DB_PATH), run by hand
-│   ├── server.py            # HTTP + WebSocket server (Starlette) + audio-file cleanup
-│   ├── scheduler.py         # Periodic chat message scheduler
-│   ├── events.py            # Channel-event announcement strings
-│   ├── log.py               # Colourful logging setup
-│   └── static/
-│       ├── index.html       # Full OBS overlay (3D speaker + effects)
-│       ├── simple.html      # Lightweight overlay
-│       ├── overlay.js       # Shared overlay runtime (queueing, WebSocket, playback)
-│       ├── overlay.css      # Shared layout and accessibility
-│       ├── full.js          # Full overlay visual adapter
-│       └── simple.js        # Lightweight visual adapter
-├── tests/                   # Unit tests (config, text rules, stores, handler, bot, tts, server, ...)
-├── data/
-│   └── messages.json        # Scheduled messages (pickledb format)
-├── docker-compose.yml
-├── Dockerfile
-└── pyproject.toml
-```
-
----
-
-## Development
-
-Run the unit test suite (configuration parsing, text normalisation, the persistence stores, the message pipeline, the scheduler, the TTS wrappers, and the overlay server's routes, path guard and WebSocket protocol):
+To populate emote images, stop Voxer and run the cache fetcher from a local installation:
 
 ```bash
-uv run pytest
+uv run --frozen voxer-fetch-emotes
 ```
 
-Run the browser smoke test with optional Playwright tooling and local ffmpeg:
+It reuses your saved Twitch authorization, so run it while the service is stopped. It fetches global emotes and emotes from your own and followed channels; `--include-followers` also scans follower channels. Restart Voxer to load the resulting `emotes/emotes.db` cache. For Docker, enable the `./emotes:/app/emotes:ro` mount after generating the cache on the host.
+
+<details>
+<summary><strong>📁 Storage paths and backups</strong></summary>
+
+| Setting | Local default | Contents |
+| :--- | :--- | :--- |
+| `VOXER_DB_PATH` | `data/voices.json` | Chatter-to-voice assignments. |
+| `VOXER_TIMESTAMPS_DB_PATH` | `data/timestamps.json` | Recent announcement timestamps. |
+| `VOXER_TOKEN_FILE` | `data/tokens.json` | Private Twitch access and refresh tokens. |
+| `VOXER_MESSAGES_PATH` | `data/messages.json` | Scheduled chat messages. |
+| `VOXER_VOICES_DIR` | `voices` | Custom voice styles. |
+| `VOXER_EMOTES_DB_PATH` | `emotes/emotes.db` | Generated emote-image cache. |
+| `VOXER_AUDIO_DIR` | `audio` | Temporary generated clips. |
+
+Back up the `data/` directory securely to preserve your settings and authorization. Generated audio and the emote cache can be recreated. Docker overrides several paths to use `/data`; see the Compose file before changing container paths.
+
+</details>
+
+<details>
+<summary><strong>🔌 Server settings and playback limits</strong></summary>
+
+| Setting | Default | Purpose |
+| :--- | :--- | :--- |
+| `VOXER_SERVER_HOST` | `127.0.0.1` | Overlay bind address. |
+| `VOXER_SERVER_PORT` | `8080` | Overlay HTTP and WebSocket port. |
+| `VOXER_OVERLAY_TOKEN` | Empty | Required for non-loopback listeners; 32–256 URL-safe characters. |
+| `VOXER_ALLOWED_HOSTS` | Empty | Additional exact hostnames/IPs; comma-separated, without schemes, ports, or wildcards. |
+| `VOXER_TRUSTED_PROXIES` | Empty | Exact proxy IPs or narrow CIDRs allowed to supply forwarded headers. |
+| `VOXER_MAX_WS_CLIENTS` | `8` | Maximum overlay connections. |
+| `VOXER_MAX_PENDING_PER_CLIENT` | `64` | Outstanding clips per overlay. |
+| `VOXER_WS_SEND_TIMEOUT` | `5` | Seconds allowed to send to an overlay before disconnecting it. |
+| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | Lifetime of outstanding playback receipts and age threshold for orphaned clips. |
+| `VOXER_AUDIO_SWEEP_INTERVAL_SECS` | `300` | Interval between audio cleanup sweeps. |
+| `VOXER_OAUTH_HOST` | `localhost` | Authorization callback bind address. |
+| `VOXER_OAUTH_PORT` | `4343` | Authorization callback port. |
+| `VOXER_OAUTH_REDIRECT_URL` | `http://localhost:4343/oauth/callback` | Must exactly match the registered Twitch redirect URL. Non-localhost callbacks require HTTPS. |
+
+Keep audio lifetimes long enough for queued playback. The `/healthz` endpoint reports HTTP service liveness; it does not confirm Twitch authorization or speech readiness.
+
+</details>
+
+<details>
+<summary><strong>🌐 Use another machine or a reverse proxy</strong></summary>
+
+For an OBS machine on your LAN, bind `VOXER_SERVER_HOST` to the server's LAN address, configure a fresh `VOXER_OVERLAY_TOKEN`, and add any hostname used in the OBS URL to `VOXER_ALLOWED_HOSTS`. If using Docker, also change its localhost-only port publishing deliberately. Keep the OAuth callback port private.
+
+Use HTTPS/WSS when crossing an untrusted network. For a TLS reverse proxy on the same host as a local Voxer process, a typical configuration is:
+
+```dotenv
+VOXER_SERVER_HOST=127.0.0.1
+VOXER_OVERLAY_TOKEN=paste_a_separate_random_secret_here
+VOXER_ALLOWED_HOSTS=tts.example.org
+VOXER_TRUSTED_PROXIES=127.0.0.1,::1
+```
+
+The proxy must preserve `Host`, replace `X-Forwarded-For` and `X-Forwarded-Proto`, and support WebSocket upgrades. Trust the proxy's actual source IP when it runs in a container; avoid broad trusted ranges. Keep the backend port private, and omit query strings from proxy access logs so overlay sign-in tokens are not recorded.
+
+If you also proxy authorization, register the exact HTTPS callback URL in Twitch and set `VOXER_OAUTH_REDIRECT_URL` to match. The default `localhost` authorization URL must be opened on the server host, or reached through a local port tunnel.
+
+</details>
+
+<a name="troubleshooting"></a>
+<h2 align="center">🛠️ A Little Help</h2>
+
+| Something's off | Try this |
+| :--- | :--- |
+| No speech | Connect an overlay, wait for model startup, and test from another account. Your configured account's own messages are skipped. |
+| Browser is silent | Click **Enable Audio**, check `volume`, and check the OBS mixer. |
+| Overlay says unauthorized | Use `?token=YOUR_TOKEN` with the current overlay secret. |
+| Invalid host | Add the hostname from your OBS URL to `VOXER_ALLOWED_HOSTS`, without a scheme or port. |
+| Twitch authorization fails | Check the Client ID, secret, exact callback URL, and that you signed in as `TWITCH_BOT_USERNAME`. |
+| Docker cannot save settings | Check that `data/` exists and is writable by UID 1000. |
+| Speech trails behind chat | Lower the queue size or maximum message age, or increase the per-user cooldown. |
+| No emote images | Generate the emote cache, mount it if using Docker, then restart. |
+| Speech conversion fails | Confirm `ffmpeg` is available on your PATH. |
+
+For more detail, set `VOXER_LOG_LEVEL=DEBUG` and restart. You can also [open an issue](https://github.com/w0rxbend/twitch-voxer/issues) with the relevant error and steps to reproduce it; leave out secrets and private state files.
+
+<details>
+<summary><strong>🧪 Working on the code? Run the checks</strong></summary>
+
+```bash
+uv sync --locked --dev
+uv run --frozen ruff check
+uv run --frozen ruff format --check
+uv run --frozen pyright
+uv run --frozen pytest -q
+node tests/test_overlay.cjs
+```
+
+Optional browser checks for both overlays:
 
 ```bash
 uv run --frozen --with playwright python -m playwright install chromium
 uv run --frozen --with playwright python tests/browser_overlay.py
 ```
 
-It starts an isolated local AudioServer, generates a silent MP3, and checks both
-overlays with normal and reduced motion, keyboard autoplay recovery, a narrow
-viewport, playback acknowledgements and browser errors. Screenshots are written
-to the printed temporary directory. It does not load Twitch grants or the TTS model.
+These use an isolated local server and temporary audio, without Twitch authorization or model downloads. Screenshots are saved to the temporary directory printed by the script.
 
----
+</details>
 
-## License
-
-MIT
+<p align="center"><strong>Less reading chat. More being there. 🖤</strong></p>

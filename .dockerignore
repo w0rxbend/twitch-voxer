@@ -2,8 +2,6 @@
 .git/
 .env
 .env.*
-.agents/
-.codex/
 .pytest_cache/
 tests/
 .venv/
@@ -17,11 +15,7 @@ __pycache__/
 
 # Docs and repo metadata not needed inside the image
 README.md
-ARCHITECTURE.md
-SECURITY.md
-ROADMAP.md
-REVIEW.md
-logo.svg
+assets/
 renovate.json
 docker-compose.yml
 Dockerfile
@@ -35,5 +29,5 @@ audio/**/*.wav
 audio/**/*.mp3
 
 # emotes.db is generated locally by voxer/fetch_emotes.py (it is gitignored);
-# only the sound files and emote list are baked into the image.
+# only the bundled sound files are baked into the image.
 emotes/emotes.db
