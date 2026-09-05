@@ -13,10 +13,12 @@ the pipeline have to be faked or the tests would be slow and flaky:
 """
 
 import os
+import json
+import asyncio
+import threading
 import time
 from pathlib import Path
 
-import pickledb
 import pytest
 
 from voxer import handler as handler_module
@@ -94,31 +96,11 @@ def fixed_language(monkeypatch: pytest.MonkeyPatch) -> None:
 async def _seeded_emote_store(
     tmp_path: Path, emotes: dict[str, dict[str, str]] | None
 ) -> EmoteStore:
-    """Build an EmoteStore over a real cache file holding `emotes`.
-
-    With `emotes` unset the store is created with db_path=None, which is how the
-    app switches emote images off entirely — the store then stays empty.
-
-    Otherwise a genuine pickledb file is written under tmp_path, one entry per
-    emote, in the same shape voxer/fetch_emotes.py produces:
-    {"Kappa": {"url_1x": ..., "url_2x": ..., "url_4x": ...}}.  Writing a real
-    file rather than reaching into EmoteStore's private dict means the test
-    exercises the loading code the running bot actually uses.
-
-    The writes are awaited because this helper runs inside an event loop:
-    pickledb's methods are "dual" sync/async and hand back a coroutine whenever
-    a loop is running, so calling them without await would write nothing at all
-    and leave every assertion passing against an empty cache.  The store itself
-    is returned unloaded on purpose — in the running bot the composition root is
-    what loads it, and build_handler below does the same.
-    """
+    """Build an unloaded store over the fetcher's JSON cache format."""
     if emotes is None:
         return EmoteStore(None)
     path = tmp_path / "emotes.db"
-    db = pickledb.PickleDB(str(path))
-    for name, urls in emotes.items():
-        await db.set(name, urls)
-    await db.save()
+    path.write_text(json.dumps(emotes))
     return EmoteStore(str(path))
 
 
@@ -399,6 +381,59 @@ class TestVoiceSource:
 
 
 class TestDispatch:
+    async def test_stale_messages_do_not_synthesize(
+        self, build_handler, fake_tts
+    ) -> None:
+        instance = await build_handler()
+        await instance.handle(
+            QueuedMessage("alice", "too late", enqueued_at=time.monotonic() - 61)
+        )
+        assert fake_tts.calls == []
+
+    async def test_expanded_speech_is_bounded(self, build_handler, fake_tts) -> None:
+        instance = await build_handler()
+        await instance.handle(QueuedMessage("alice", "icymi " * 1000))
+        assert len(fake_tts.spoken_text) <= 1000
+
+    async def test_no_overlay_skips_inference(self, build_handler, fake_tts) -> None:
+        instance = await build_handler()
+        instance._overlay_available = lambda: False
+        await instance.handle(QueuedMessage("alice", "hello"))
+        assert fake_tts.calls == []
+
+    async def test_cancelled_synthesis_deletes_late_wav(
+        self, build_handler, fake_tts, tmp_path, monkeypatch
+    ) -> None:
+        entered = asyncio.Event()
+        release = threading.Event()
+        written = threading.Event()
+        loop = asyncio.get_running_loop()
+        wav = tmp_path / "cancelled.wav"
+
+        def slow_synthesis(*args, **kwargs):
+            loop.call_soon_threadsafe(entered.set)
+            release.wait(timeout=5)
+            wav.touch()
+            written.set()
+            return wav
+
+        monkeypatch.setattr(fake_tts, "save_wav", slow_synthesis)
+        instance = await build_handler()
+        pending = asyncio.create_task(instance.handle(QueuedMessage("alice", "hello")))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        finally:
+            release.set()
+        assert await asyncio.to_thread(written.wait, 5)
+        for _ in range(100):
+            if not wav.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert not wav.exists()
+
     async def test_system_message_is_spoken_verbatim(
         self, build_handler, fake_tts
     ) -> None:

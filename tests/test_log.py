@@ -20,7 +20,7 @@ from collections.abc import Iterator
 import pytest
 
 from voxer.config import LOG_LEVEL
-from voxer.log import setup_logging
+from voxer.log import RedactingFormatter, setup_logging
 
 _QUIETED = ("websockets", "uvicorn", "asyncio")
 
@@ -100,6 +100,25 @@ class TestLevelResolution:
 
 
 class TestHandlers:
+    @pytest.mark.parametrize(
+        "secret_text",
+        [
+            "Bearer topsecret",
+            "oauth:topsecret",
+            "access_token=topsecret",
+            "refresh_token=topsecret",
+            "client_secret=topsecret",
+            "token=topsecret",
+            "Authorization: Bearer topsecret",
+        ],
+    )
+    def test_credentials_are_redacted_after_formatting(self, secret_text) -> None:
+        formatter = RedactingFormatter("%(message)s")
+        record = logging.LogRecord(
+            "test", logging.ERROR, "", 1, "%s", (secret_text,), None
+        )
+        assert "topsecret" not in formatter.format(record)
+
     def test_root_ends_with_exactly_one_handler(self) -> None:
         """Two handlers would print every line twice.
 

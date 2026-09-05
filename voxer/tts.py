@@ -16,7 +16,9 @@ on every message — loading is expensive on the first call per style name.
 
 import asyncio
 import logging
+import math
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,8 @@ BUILTIN_VOICES: list[str] = ["M1", "M2", "M3", "M4", "M5", "F1", "F2", "F3", "F4
 # libraries it was compiled against); the sentence that says what actually went
 # wrong is at the very end, so only the tail is worth putting in an exception.
 FFMPEG_STDERR_LINES: int = 5
+FFMPEG_STDERR_BYTES = 8192
+FFMPEG_TIMEOUT_SECS = 30.0
 
 
 class TTSService:
@@ -60,6 +64,7 @@ class TTSService:
         self._tts = engine if engine is not None else TTS(auto_download=True)
         # Map of voice_name → style object, populated lazily or at init time
         self._voice_cache: dict[str, Any] = {}
+        self._inference_lock = threading.Lock()
         self._custom_voice_names: list[str] = []
         if voices_dir is not None:
             self._load_custom_voices(voices_dir)
@@ -105,10 +110,12 @@ class TTSService:
         This is the single place that knows the full pool; the composition root
         hands it to VoiceStore, which owns assignment of a voice to a chatter.
         """
-        return BUILTIN_VOICES + self._custom_voice_names
+        return list(dict.fromkeys(BUILTIN_VOICES + self._custom_voice_names))
 
     def _voice_style(self, voice_name: str) -> Any:
         """Return the cached style object for voice_name, loading it on first access."""
+        if voice_name not in self.voice_names:
+            raise ValueError("Unknown voice style")
         if voice_name not in self._voice_cache:
             LOGGER.debug("Loading voice style: %s", voice_name)
             self._voice_cache[voice_name] = self._tts.get_voice_style(
@@ -135,16 +142,21 @@ class TTSService:
         Returns:
             Path to the generated temporary WAV file.
         """
-        LOGGER.debug("Synthesising [%s/%s]: %r", voice_name, lang, text)
-        wav, _ = self._tts.synthesize(
-            text, voice_style=self._voice_style(voice_name), lang=lang
-        )
+        if not text.strip() or len(text) > 2000:
+            raise ValueError("Speech must contain between 1 and 2000 characters")
+        if lang not in {"uk", "en"}:
+            raise ValueError("Unsupported speech language")
+        LOGGER.debug("Synthesising [%s/%s], %d characters", voice_name, lang, len(text))
         # Use a named temp file with delete=False so we can return the path;
         # the caller is responsible for cleanup.
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             path = Path(tmp.name)
         try:
-            self._tts.save_audio(wav, str(path))
+            with self._inference_lock:
+                wav, _ = self._tts.synthesize(
+                    text, voice_style=self._voice_style(voice_name), lang=lang
+                )
+                self._tts.save_audio(wav, str(path))
         except BaseException:
             # save_audio failed (disk full, codec error) — remove the temp file
             # ourselves, because the caller never gets a path to clean up
@@ -155,7 +167,11 @@ class TTSService:
 
     @staticmethod
     async def to_mp3(
-        wav_path: Path, mp3_path: Path, *, ffmpeg_bin: str = "ffmpeg"
+        wav_path: Path,
+        mp3_path: Path,
+        *,
+        ffmpeg_bin: str = "ffmpeg",
+        timeout_secs: float = FFMPEG_TIMEOUT_SECS,
     ) -> None:
         """Convert a WAV file to MP3 using ffmpeg as an async subprocess.
 
@@ -181,21 +197,56 @@ class TTSService:
             RuntimeError: If ffmpeg exits with a non-zero return code.  The
                 message carries the exit code and the tail of ffmpeg's stderr.
         """
+        if not math.isfinite(timeout_secs) or timeout_secs <= 0:
+            raise ValueError("ffmpeg timeout must be finite and positive")
         LOGGER.debug("Converting to MP3: %s", mp3_path.name)
         proc = await asyncio.create_subprocess_exec(
             ffmpeg_bin,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
             "-y",
+            "-protocol_whitelist",
+            "file,pipe",
             "-i",
             str(wav_path),
+            "-vn",
+            "-threads",
+            "1",
+            "-t",
+            "120",
+            "-f",
+            "mp3",
             str(mp3_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        # communicate() rather than wait(): now that stderr is a pipe, its
-        # operating-system buffer can fill up, and a process whose stderr is
-        # full blocks forever waiting for someone to read it.  wait() never
-        # reads, so it would deadlock; communicate() drains while it waits.
-        _, err = await proc.communicate()
+        err = bytearray()
+
+        async def drain_stderr() -> None:
+            assert proc.stderr is not None
+            while chunk := await proc.stderr.read(4096):
+                err.extend(chunk)
+                if len(err) > FFMPEG_STDERR_BYTES:
+                    del err[:-FFMPEG_STDERR_BYTES]
+
+        reader = asyncio.create_task(drain_stderr())
+        try:
+            async with asyncio.timeout(timeout_secs):
+                await proc.wait()
+                await reader
+        except BaseException:
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            await proc.wait()
+            reader.cancel()
+            await asyncio.gather(reader, return_exceptions=True)
+            mp3_path.unlink(missing_ok=True)
+            raise
         if proc.returncode != 0:
             lines = [
                 line.strip()

@@ -7,7 +7,7 @@ creates objects and connects them.
 Startup order matters:
   1. Logging must be configured before anything else logs.
   2. TTSService downloads the model on first run, so it starts early.
-  3. The three pickledb-backed stores are loaded before the handler starts
+  3. The three JSON-backed stores are loaded before the handler starts
      draining the queue, so the first message already sees emote images and
      remembered voice assignments.
   4. bot_id is fetched before the bot socket opens so subscriptions can reference it.
@@ -35,6 +35,7 @@ from pathlib import Path
 
 from .bot import VoxBot, get_user_id
 from .config import (
+    ALLOWED_HOSTS,
     ANNOUNCE_WINDOW_SECS,
     AUDIO_DIR,
     AUDIO_MAX_AGE_SECS,
@@ -44,15 +45,22 @@ from .config import (
     DB_PATH,
     EMOTE_SOUND_PATHS,
     EMOTES_DB_PATH,
+    MAX_MESSAGE_AGE_SECS,
+    MAX_MESSAGE_CHARS,
+    MAX_PENDING_PER_CLIENT,
+    MAX_SPEECH_CHARS,
+    MAX_WS_CLIENTS,
     MESSAGE_QUEUE_MAXSIZE,
     MESSAGES_PATH,
     NO_ANNOUNCE_USERS,
+    OVERLAY_TOKEN,
     SCHEDULER_EMPTY_RETRY_DELAY,
     SCHEDULER_INITIAL_DELAY,
     SERVER_HOST,
     SERVER_PORT,
     TIMESTAMPS_DB_PATH,
     TOKEN_FILE,
+    TRUSTED_PROXIES,
     VOICES_DIR,
     WS_SEND_TIMEOUT,
     validate_config,
@@ -164,15 +172,21 @@ async def run() -> None:
         host=SERVER_HOST,
         port=SERVER_PORT,
         send_timeout=WS_SEND_TIMEOUT,
+        overlay_token=OVERLAY_TOKEN,
+        allowed_hosts=ALLOWED_HOSTS,
+        max_clients=MAX_WS_CLIENTS,
+        max_pending_per_client=MAX_PENDING_PER_CLIENT,
+        audio_max_age=AUDIO_MAX_AGE_SECS,
+        trusted_proxies=TRUSTED_PROXIES,
     )
 
-    # Persistence: each store owns one pickledb file.  The engine is the single
+    # Persistence: each store owns one JSON file.  The engine is the single
     # source of truth for which voices exist, so the pool comes from it.
     voice_store = VoiceStore(DB_PATH, tts.voice_names)
     announce_tracker = AnnounceTracker(TIMESTAMPS_DB_PATH, ANNOUNCE_WINDOW_SECS)
     emote_store = EmoteStore(EMOTES_DB_PATH)
 
-    # Reading a pickledb file is I/O, so it has to be awaited, and `async def
+    # Reading a JSON file is I/O, so it has to be awaited, and `async def
     # __init__` is not valid Python — a store cannot fill itself in its own
     # constructor.  The loads therefore happen here, right under the lines that
     # created the objects: whatever builds a component is what starts it.  They
@@ -181,9 +195,9 @@ async def run() -> None:
     # Each store tolerates a missing or unreadable file on its own, so a failure
     # here costs a feature — no emote images, forgotten voice assignments —
     # rather than aborting startup.
-    await emote_store.load()
-    await voice_store.load()
-    await announce_tracker.load()
+    await asyncio.gather(
+        emote_store.load(), voice_store.load(), announce_tracker.load()
+    )
 
     # MessageHandler is the core business logic layer.  server.broadcast is
     # passed in so the handler never imports the server directly (loose coupling).
@@ -197,6 +211,10 @@ async def run() -> None:
         message_queue=message_queue,
         emote_sound_paths=EMOTE_SOUND_PATHS,
         no_announce_users=NO_ANNOUNCE_USERS,
+        max_text_chars=MAX_MESSAGE_CHARS,
+        max_speech_chars=MAX_SPEECH_CHARS,
+        max_message_age_secs=MAX_MESSAGE_AGE_SECS,
+        overlay_available=lambda: server.has_clients,
     )
 
     # Resolve the numeric Twitch user ID for the bot account.  Only needs the
@@ -314,6 +332,10 @@ async def run() -> None:
             # of any other type are not caught and still propagate.
             LOGGER.info("All components stopped")
         finally:
+            try:
+                await asyncio.gather(announce_tracker.flush(), voice_store.flush())
+            except OSError:
+                LOGGER.exception("Could not checkpoint persistent state")
             # Hand the signals back before leaving, so that anything that runs
             # after this point (the bot's own shutdown, below) reacts to Ctrl-C
             # the ordinary way instead of calling a handler whose work is done.

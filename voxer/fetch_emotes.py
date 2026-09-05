@@ -32,19 +32,18 @@ voxer.config), so it must be run with `-m` rather than as a bare file path —
 `python voxer/fetch_emotes.py` cannot resolve the package-relative import.
 """
 
+import argparse
 import datetime
 import http.server
-import json
-import os
 import secrets
 import time
 import urllib.parse
 import webbrowser
-import pickledb
 import requests
 from pathlib import Path
 
 from . import config
+from .token_store import TokenFileLock, read_tokens, write_json_atomic
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -78,6 +77,53 @@ OUTPUT_FILE = Path(config.EMOTES_DB_PATH)
 # means this script needs no OAuth flow of its own once the bot has run once.
 # config.TOKEN_FILE is a str; this module treats it as a Path throughout.
 TOKEN_FILE = Path(config.TOKEN_FILE)
+HTTP_TIMEOUT = (5, 30)
+MAX_PAGES = 1000
+MAX_CHANNELS = 10000
+
+
+def _get(session: requests.Session, url: str, **kwargs) -> requests.Response:
+    """Retry idempotent reads within a fixed budget, honoring Twitch rate limits."""
+    for attempt in range(3):
+        reset = getattr(session, "_voxer_rate_reset", 0)
+        if isinstance(reset, (float, int)) and reset > time.time():
+            delay = reset - time.time()
+            if delay > 30:
+                raise RuntimeError(
+                    "Twitch rate limit requires a longer wait; retry the command later"
+                )
+            time.sleep(max(delay, 0))
+        response = session.get(
+            url, timeout=HTTP_TIMEOUT, allow_redirects=False, **kwargs
+        )
+        if response.status_code not in (429, 500, 502, 503, 504):
+            if response.headers.get("Ratelimit-Remaining") == "0":
+                try:
+                    setattr(
+                        session,
+                        "_voxer_rate_reset",
+                        float(response.headers["Ratelimit-Reset"]),
+                    )
+                except KeyError, ValueError:
+                    pass
+            return response
+        if attempt == 2:
+            return response
+        try:
+            retry_after = response.headers.get("Retry-After")
+            delay = (
+                float(retry_after)
+                if retry_after
+                else (float(response.headers.get("Ratelimit-Reset", "0")) - time.time())
+            )
+        except ValueError:
+            delay = 0
+        delay = max(delay, 2**attempt)
+        if delay > 30:
+            response.raise_for_status()
+        response.close()
+        time.sleep(delay)
+    raise AssertionError("Unreachable retry state")
 
 
 # ── Authentication helpers ────────────────────────────────────────────────────
@@ -91,11 +137,13 @@ def get_app_token(session: requests.Session) -> str:
     """
     resp = session.post(
         "https://id.twitch.tv/oauth2/token",
-        params={
+        data={
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
             "grant_type": "client_credentials",
         },
+        timeout=HTTP_TIMEOUT,
+        allow_redirects=False,
     )
     resp.raise_for_status()
     return resp.json()["access_token"]
@@ -110,38 +158,43 @@ def _refresh_grant(session: requests.Session, refresh_token: str) -> dict | None
     try:
         resp = session.post(
             "https://id.twitch.tv/oauth2/token",
-            params={
+            data={
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
                 "client_id": CLIENT_ID,
                 "client_secret": CLIENT_SECRET,
             },
+            timeout=HTTP_TIMEOUT,
+            allow_redirects=False,
         )
         resp.raise_for_status()
         return resp.json()
-    except requests.HTTPError:
-        return None
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code in (400, 401):
+            return None
+        raise
 
 
-def _write_tokens_atomically(tokens: dict, fresh_refresh: str) -> None:
-    """Replace TOKEN_FILE with the rotated pair without risking a truncated file.
+def _write_tokens_atomically(tokens: dict, fresh_refresh: str | None = None) -> None:
+    """Persist privately; failures propagate without printing credentials."""
+    write_json_atomic(TOKEN_FILE, tokens)
 
-    Writes to a temp file in the same directory, fsyncs, then os.replace()s it
-    over the original — a crash mid-write can therefore never destroy the only
-    copy of the credentials.  If even that fails, the fresh refresh token is
-    printed so it can be recovered manually.
-    """
-    tmp = TOKEN_FILE.with_suffix(".tmp")
-    try:
-        with open(tmp, "w") as fp:
-            json.dump(tokens, fp)
-            fp.flush()
-            os.fsync(fp.fileno())
-        os.replace(tmp, TOKEN_FILE)
-    except OSError as exc:
-        print(f"  Warning: could not write rotated tokens back to {TOKEN_FILE}: {exc}")
-        print("  Save this refresh token manually or re-run the bot's OAuth flow:")
-        print(f"    {fresh_refresh}")
+
+def _store_grant(session: requests.Session, fresh: dict) -> str:
+    """Persist an independently authorized token pair while its owner lock is held."""
+    access_token = fresh["access_token"]
+    if not token_has_scopes(session, access_token, set(SCOPES)):
+        raise RuntimeError("Twitch grant has the wrong account, application or scopes")
+    user = get_current_user(session, access_token)
+    tokens = read_tokens(TOKEN_FILE)
+    tokens[user["id"]] = {
+        "user_id": user["id"],
+        "token": access_token,
+        "refresh": fresh["refresh_token"],
+        "last_validated": datetime.datetime.now().isoformat(),
+    }
+    _write_tokens_atomically(tokens)
+    return access_token
 
 
 def refresh_from_token_file(
@@ -166,35 +219,55 @@ def refresh_from_token_file(
     """
     needed = set(SCOPES) if needed is None else needed
     try:
-        tokens: dict[str, dict] = json.loads(TOKEN_FILE.read_text())
-    except FileNotFoundError, ValueError, OSError:
+        tokens = read_tokens(TOKEN_FILE)
+    except ValueError, OSError:
         return None
     if not isinstance(tokens, dict):
         return None
 
     for user_id, entry in tokens.items():
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get("user_id", user_id) != user_id:
             continue
         # Prefer the stored access token while it is still usable — no rotation.
         # It must carry every needed scope: a token that merely validates would
         # otherwise be returned here and then rejected by the caller's own check.
         stored = entry.get("token")
-        if stored and token_has_scopes(session, stored, needed):
+        if isinstance(stored, str) and token_has_scopes(
+            session, stored, needed, expected_user_id=user_id
+        ):
             return stored
         refresh = entry.get("refresh")
-        if not refresh:
+        if not isinstance(refresh, str) or not refresh:
             continue
-        fresh = _refresh_grant(session, refresh)
-        if not fresh:
-            continue
-        tokens[user_id] = {
-            "user_id": user_id,
-            "token": fresh["access_token"],
-            "refresh": fresh["refresh_token"],
-            "last_validated": datetime.datetime.now().isoformat(),
-        }
-        _write_tokens_atomically(tokens, fresh["refresh_token"])
-        return fresh["access_token"]
+        with TokenFileLock(TOKEN_FILE):
+            # Another fetcher may have refreshed between the first read and lock.
+            latest = read_tokens(TOKEN_FILE)
+            current = latest.get(user_id)
+            if not isinstance(current, dict):
+                continue
+            current_token = current.get("token")
+            if current_token != stored and isinstance(current_token, str):
+                if token_has_scopes(
+                    session, current_token, needed, expected_user_id=user_id
+                ):
+                    return current_token
+            refresh = current.get("refresh")
+            if not isinstance(refresh, str) or not refresh:
+                continue
+            fresh = _refresh_grant(session, refresh)
+            if not fresh:
+                continue
+            latest[user_id] = {
+                "user_id": user_id,
+                "token": fresh["access_token"],
+                "refresh": fresh["refresh_token"],
+                "last_validated": datetime.datetime.now().isoformat(),
+            }
+            _write_tokens_atomically(latest)
+            if token_has_scopes(
+                session, fresh["access_token"], needed, expected_user_id=user_id
+            ):
+                return fresh["access_token"]
     return None
 
 
@@ -206,32 +279,66 @@ def refresh_user_token(session: requests.Session) -> str | None:
     """
     if not REFRESH_TOKEN:
         return None
-    fresh = _refresh_grant(session, REFRESH_TOKEN)
-    return fresh["access_token"] if fresh else None
+    with TokenFileLock(TOKEN_FILE):
+        fresh = _refresh_grant(session, REFRESH_TOKEN)
+        return _store_grant(session, fresh) if fresh else None
 
 
-def validate_token_scopes(session: requests.Session, token: str) -> set[str]:
+def validate_token_scopes(
+    session: requests.Session, token: str, *, expected_user_id: str | None = None
+) -> set[str]:
     """Return the set of scopes granted to token, or an empty set on failure."""
-    resp = session.get(
+    resp = _get(
+        session,
         "https://id.twitch.tv/oauth2/validate",
         headers={"Authorization": f"OAuth {token}"},
     )
-    if resp.status_code != 200:
+    if resp.status_code == 401:
         return set()
-    return set(resp.json().get("scopes", []))
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("client_id") != CLIENT_ID or not data.get("user_id"):
+        return set()
+    if expected_user_id is not None and data["user_id"] != expected_user_id:
+        return set()
+    if (
+        config.BOT_USERNAME
+        and data.get("login", "").casefold() != config.BOT_USERNAME.casefold()
+    ):
+        return set()
+    scopes = data.get("scopes", [])
+    if not isinstance(scopes, list) or not all(
+        isinstance(scope, str) for scope in scopes
+    ):
+        return set()
+    return set(scopes)
 
 
-def token_has_scopes(session: requests.Session, token: str, needed: set[str]) -> bool:
+def token_has_scopes(
+    session: requests.Session,
+    token: str,
+    needed: set[str],
+    *,
+    expected_user_id: str | None = None,
+) -> bool:
     """Return True when token is valid AND carries every scope in needed.
 
     A token that validates but lacks a scope is useless to this script, so the
     two questions ("is it alive?" and "can it do what we need?") are answered
     together rather than letting a live-but-under-scoped token pass as good.
     """
-    return needed.issubset(validate_token_scopes(session, token))
+    return needed.issubset(
+        validate_token_scopes(session, token, expected_user_id=expected_user_id)
+    )
 
 
 def oauth_flow(session: requests.Session) -> str:
+    """Authorize and persist credentials while excluding concurrent bot refreshes."""
+    with TokenFileLock(TOKEN_FILE):
+        return _oauth_flow_locked(session)
+
+
+def _oauth_flow_locked(session: requests.Session) -> str:
     """Run the Authorization Code flow and return a fresh user access token.
 
     Steps:
@@ -266,16 +373,34 @@ def oauth_flow(session: requests.Session) -> str:
             # The `state` must match the one we generated — this is the CSRF
             # (cross-site request forgery) guard: without the check, any page in
             # the browser could hit localhost and inject an attacker's code.
-            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-            if params.get("state", [None])[0] != state:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path != urllib.parse.urlparse(REDIRECT_URI).path:
+                self.send_error(404)
+                return
+            params = urllib.parse.parse_qs(parsed.query, max_num_fields=10)
+            received_state = params.get("state", [""])[0]
+            if (
+                len(params.get("state", [])) != 1
+                or not received_state.isascii()
+                or not secrets.compare_digest(received_state, state)
+            ):
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(b"<h1>Invalid state parameter.</h1>")
+                return
+            if "error" in params:
+                code_holder["error"] = "Authorization was denied."
+                self.send_error(400, "Authorization was denied.")
+                return
+            if len(params.get("code", [])) != 1 or not params["code"][0]:
+                self.send_error(400, "Missing authorization code.")
                 return
             if "code" in params:
                 code_holder["code"] = params["code"][0]
             self.send_response(200)
             self.send_header("Content-type", "text/html")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
             self.wfile.write(b"<h1>Authorized! You can close this tab.</h1>")
 
@@ -283,17 +408,23 @@ def oauth_flow(session: requests.Session) -> str:
             # Suppress the default per-request log lines from BaseHTTPRequestHandler
             pass
 
-    server = http.server.HTTPServer(("localhost", 1337), Handler)
-    server.timeout = 1  # handle_request() returns after 1 s even if no request arrived
+    class CallbackServer(http.server.HTTPServer):
+        def get_request(self):
+            connection, address = super().get_request()
+            connection.settimeout(2)
+            return connection, address
 
-    print("\nOpening browser for Twitch authorization...")
-    print(f"If the browser does not open, visit:\n  {auth_url}\n")
-    webbrowser.open(auth_url)
-
-    deadline = time.time() + 120
-    while "code" not in code_holder and time.time() < deadline:
-        server.handle_request()
-    server.server_close()
+    with CallbackServer(("localhost", 1337), Handler) as server:
+        server.timeout = 1
+        print("\nOpening browser for Twitch authorization...")
+        print(f"If the browser does not open, visit:\n  {auth_url}\n")
+        try:
+            webbrowser.open(auth_url)
+        except webbrowser.Error:
+            pass
+        deadline = time.monotonic() + 120
+        while not code_holder and time.monotonic() < deadline:
+            server.handle_request()
 
     code = code_holder.get("code")
     if not code:
@@ -302,16 +433,18 @@ def oauth_flow(session: requests.Session) -> str:
     # Exchange the authorization code for an access token
     resp = session.post(
         "https://id.twitch.tv/oauth2/token",
-        params={
+        data={
             "client_id": CLIENT_ID,
             "client_secret": CLIENT_SECRET,
             "code": code,
             "grant_type": "authorization_code",
             "redirect_uri": REDIRECT_URI,
         },
+        timeout=HTTP_TIMEOUT,
+        allow_redirects=False,
     )
     resp.raise_for_status()
-    return resp.json()["access_token"]
+    return _store_grant(session, resp.json())
 
 
 def get_user_token(session: requests.Session) -> str:
@@ -324,7 +457,6 @@ def get_user_token(session: requests.Session) -> str:
       3. Otherwise run the full OAuth flow in the browser.
     A refreshed token is used only when it carries all required scopes.
     """
-    needed = set(SCOPES)
     # Lazy callables: a later source must not be refreshed (Twitch rotates the
     # refresh token on every use) when an earlier one already succeeded.
     sources = (
@@ -335,11 +467,8 @@ def get_user_token(session: requests.Session) -> str:
         token = fetch(session)
         if not token:
             continue
-        scopes = validate_token_scopes(session, token)
-        if needed.issubset(scopes):
-            print(f"  Using token refreshed from {source}")
-            return token
-        print(f"  Token from {source} is missing scopes: {needed - scopes}")
+        print(f"  Using validated token from {source}")
+        return token
     print("  No reusable token found. Running OAuth flow...")
     return oauth_flow(session)
 
@@ -354,9 +483,17 @@ def hdrs(token: str) -> dict:
 
 def get_current_user(session: requests.Session, token: str) -> dict:
     """Return the authenticated user's Twitch profile dict."""
-    resp = session.get(f"{BASE_URL}/users", headers=hdrs(token))
+    resp = _get(session, f"{BASE_URL}/users", headers=hdrs(token))
     resp.raise_for_status()
-    return resp.json()["data"][0]
+    user = resp.json()["data"][0]
+    if (
+        config.BOT_USERNAME
+        and user["login"].casefold() != config.BOT_USERNAME.casefold()
+    ):
+        raise RuntimeError(
+            "Authorize the configured bot account before fetching emotes"
+        )
+    return user
 
 
 def paginate(
@@ -369,18 +506,22 @@ def paginate(
     """
     results: list[dict] = []
     cursor = None
-    while True:
+    seen_cursors: set[str] = set()
+    for _page in range(MAX_PAGES):
         # Merge the `after` cursor into params only when one exists
         p = {**params, **({"after": cursor} if cursor else {})}
-        resp = session.get(url, headers=hdrs(token), params=p)
+        resp = _get(session, url, headers=hdrs(token), params=p)
         resp.raise_for_status()
         data = resp.json()
         batch = data.get("data", [])
         results.extend(batch)
         cursor = data.get("pagination", {}).get("cursor")
         if not cursor or not batch:
-            break
-    return results
+            return results
+        if cursor in seen_cursors:
+            raise RuntimeError("Twitch returned a repeated pagination cursor")
+        seen_cursors.add(cursor)
+    raise RuntimeError(f"Twitch pagination exceeded {MAX_PAGES} pages")
 
 
 def fetch_followed_ids(
@@ -411,7 +552,7 @@ def fetch_follower_ids(
 
 def fetch_global_emotes(session: requests.Session, token: str) -> list[dict]:
     """Return all global Twitch emotes (available in every channel)."""
-    resp = session.get(f"{BASE_URL}/chat/emotes/global", headers=hdrs(token))
+    resp = _get(session, f"{BASE_URL}/chat/emotes/global", headers=hdrs(token))
     resp.raise_for_status()
     return resp.json()["data"]
 
@@ -424,7 +565,8 @@ def fetch_channel_emotes(
     Returns an empty list for channels that have no emotes or don't exist (400/404),
     rather than raising, so a single missing channel doesn't abort the whole fetch.
     """
-    resp = session.get(
+    resp = _get(
+        session,
         f"{BASE_URL}/chat/emotes",
         headers=hdrs(token),
         params={"broadcaster_id": broadcaster_id},
@@ -438,13 +580,22 @@ def fetch_channel_emotes(
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Fetch all emotes and write them to OUTPUT_FILE (VOXER_EMOTES_DB_PATH).
 
     The output file maps emote name → {url_1x, url_2x, url_4x}.
     Duplicate emote names (same name in multiple channels) are deduplicated
     by keeping the first occurrence — typically the global version.
     """
+    parser = argparse.ArgumentParser(
+        description="Fetch Twitch emotes into the configured local cache"
+    )
+    parser.add_argument(
+        "--include-followers",
+        action="store_true",
+        help="also scan follower channels (potentially many API requests)",
+    )
+    args = parser.parse_args(argv)
     # Only the two application credentials — deliberately not the bot's whole
     # configuration.  config.validate_config() would additionally require
     # TWITCH_BOT_USERNAME and a working OAuth redirect URL, and this script
@@ -477,12 +628,19 @@ def main() -> None:
         followed_ids = fetch_followed_ids(session, user_token, user_id)
         print(f"  Following {len(followed_ids)} channels")
 
-        print("Fetching follower channels...")
-        follower_ids = fetch_follower_ids(session, user_token, user_id)
-        print(f"  {len(follower_ids)} followers")
+        follower_ids = []
+        if args.include_followers:
+            print("Fetching follower channels...")
+            follower_ids = fetch_follower_ids(session, user_token, user_id)
+            print(f"  {len(follower_ids)} followers")
 
         # Union of followed + follower channels; channels in both sets are deduplicated
-        all_channel_ids = list(set(followed_ids + follower_ids))
+        all_channel_ids = [
+            user_id,
+            *sorted(set(followed_ids + follower_ids) - {user_id}),
+        ]
+        if len(all_channel_ids) > MAX_CHANNELS:
+            raise RuntimeError(f"Emote fetch exceeds the {MAX_CHANNELS}-channel limit")
         print(f"\nFetching emotes for {len(all_channel_ids)} unique channels...")
 
         channel_emotes: list[dict] = []
@@ -494,33 +652,25 @@ def main() -> None:
                 print(
                     f"  {i}/{len(all_channel_ids)} done ({len(channel_emotes)} emotes so far)..."
                 )
-                time.sleep(0.3)
 
         print(
             f"  {len(channel_emotes)} channel emotes from {len(all_channel_ids)} channels"
         )
 
         print(f"\nWriting to {OUTPUT_FILE}...")
-        seen: set[str] = set()
-        with pickledb.PickleDB(str(OUTPUT_FILE)) as db:
-            for emote in global_emotes + channel_emotes:
-                name = emote["name"]
-                if name in seen:
-                    continue  # keep the first occurrence (usually the global emote)
-                seen.add(name)
-                imgs = emote["images"]
-                # pickledb's set() is a dual sync/async method; outside an event
-                # loop it runs synchronously, so the "coroutine" is never awaited
-                _ = db.set(
-                    name,
-                    {
-                        "url_1x": imgs["url_1x"],
-                        "url_2x": imgs["url_2x"],
-                        "url_4x": imgs["url_4x"],
-                    },
-                )
-
-        print(f"Saved to {OUTPUT_FILE} ({len(seen)} unique emotes)")
+        emote_cache: dict[str, dict[str, str]] = {}
+        for emote in global_emotes + channel_emotes:
+            name = emote["name"]
+            if name in emote_cache:
+                continue
+            images = emote["images"]
+            emote_cache[name] = {
+                key: images[key] for key in ("url_1x", "url_2x", "url_4x")
+            }
+        # PickleDB stores plain JSON. Publishing once removes repeated full-file
+        # rewrites and preserves the previous cache if a fetch or write fails.
+        write_json_atomic(OUTPUT_FILE, emote_cache)
+        print(f"Saved to {OUTPUT_FILE} ({len(emote_cache)} unique emotes)")
 
 
 if __name__ == "__main__":

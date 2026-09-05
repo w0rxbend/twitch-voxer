@@ -53,6 +53,26 @@ KNOWN_BOTS: frozenset[str] = frozenset(
 
 # Matches http:// and https:// URLs so they can be replaced with spoken text.
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_CONTROL_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
+MAX_RAW_TEXT_CHARS: Final[int] = 500
+MAX_SPEECH_CHARS: Final[int] = 1000
+
+
+def sanitize_text(text: str, max_chars: int = MAX_RAW_TEXT_CHARS) -> str:
+    """Bound untrusted text and remove controls and engine expression delimiters."""
+    text = _CONTROL_RE.sub(" ", text[:max_chars])
+    return " ".join(text.replace("<", " ").replace(">", " ").split())
+
+
+def limit_speech(text: str, max_chars: int = MAX_SPEECH_CHARS) -> str:
+    """Bound expanded speech without cutting a generated expression tag in half."""
+    clipped = text[:max_chars]
+    if clipped.rfind("<") > clipped.rfind(">"):
+        clipped = clipped[: clipped.rfind("<")]
+    return clipped.rstrip()
+
 
 # The expression tag the TTS engine understands as "laugh here", and the burst of
 # three that a laugh token is actually replaced with.  One laugh is too short to
@@ -313,10 +333,22 @@ def extract_emojis(text: str) -> tuple[str, list[EmoteItem]]:
     Twemoji image URLs, then returns a cleaned string with emoji removed.
     The items are later merged with Twitch emote items to form the overlay list.
     """
-    found = emoji_lib.emoji_list(text)
-    items = [EmoteItem(name=e["emoji"], url=emoji_url(e["emoji"])) for e in found]
-    clean = emoji_lib.replace_emoji(text, replace="").strip()
-    return clean, items
+    # One token stream supplies both speech and images. Joined nonstandard
+    # sequences still produce individual images, as emoji_list() did.
+    items: list[EmoteItem] = []
+    parts: list[str] = []
+    for token in emoji_lib.analyze(text, non_emoji=True, join_emoji=True):
+        if isinstance(token.value, str):
+            parts.append(token.value)
+            continue
+        matches = (
+            token.value.emojis
+            if isinstance(token.value, emoji_lib.EmojiMatchZWJNonRGI)
+            else [token.value]
+        )
+        for match in matches:
+            items.append(EmoteItem(name=match.emoji, url=emoji_url(match.emoji)))
+    return "".join(parts).strip(), items
 
 
 def is_bot(username: str) -> bool:
@@ -325,14 +357,13 @@ def is_bot(username: str) -> bool:
     return lower in KNOWN_BOTS or "bot" in lower
 
 
-def normalize(text: str, lang: str) -> str:
+def normalize(text: str, lang: str, *, max_chars: int = MAX_SPEECH_CHARS) -> str:
     """Apply text transformations to make a chat message more speakable.
 
     Transformations (applied in order):
       1. Replace URLs with a language-appropriate spoken phrase.
       2. Expand abbreviations using the language-specific lookup table.
-      3. Replace laugh tokens with the TTS <laugh> tag and also prepend it
-         so the voice opens with laughter before reading the rest.
+      3. Collapse laugh tokens into one bounded expression burst before speech.
 
     Every language-dependent value comes from one LanguageRules entry, so an
     unrecognised code falls back to DEFAULT_LANG for all of them together.
@@ -345,6 +376,7 @@ def normalize(text: str, lang: str) -> str:
     Returns:
         Normalised text ready for TTS synthesis.
     """
+    text = sanitize_text(text)
     rules = rules_for(lang)
     text, link_count = _URL_RE.subn(rules.link_replacement, text)
 
@@ -353,13 +385,15 @@ def normalize(text: str, lang: str) -> str:
         lambda m: rules.abbrevs[m.group(0).lower()], text
     )
 
-    text, laugh_count = _LAUGH_RE.subn(_LAUGH_BURST, text)
+    text, laugh_count = _LAUGH_RE.subn("", text)
     if link_count:
         LOGGER.debug("Replaced %d link(s)", link_count)
     if abbrev_count:
         LOGGER.debug("Expanded %d abbreviation(s)", abbrev_count)
     if laugh_count:
-        LOGGER.debug("Applied %d <laugh> tag(s): %s", laugh_count, text)
-        # Prepend laugh so the voice starts laughing *before* reading the message
-        text = _LAUGH_BURST + text
-    return text
+        LOGGER.debug(
+            "Collapsed %d laugh token(s) into one expression burst", laugh_count
+        )
+        # A fixed burst avoids hundreds of expressions from repeated chat laughs.
+        text = _LAUGH_BURST + " " + text
+    return limit_speech(text, max_chars)

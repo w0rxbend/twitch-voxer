@@ -1,9 +1,11 @@
 """Unit tests for the pickledb persistence wrappers in voxer.stores."""
 
 import asyncio
+import json
+import time
+import threading
 from pathlib import Path
 
-import pickledb
 import pytest
 
 from voxer.stores import AnnounceTracker, EmoteStore, VoiceStore
@@ -40,31 +42,142 @@ def voice_store(tmp_path: Path) -> VoiceStore:
 
 @pytest.fixture
 def emote_db_path(tmp_path: Path) -> str:
-    """Write a real emote cache file the way voxer/fetch_emotes.py writes it.
-
-    The fetcher opens the cache with a plain ``with pickledb.PickleDB(...)``
-    block and calls ``set()`` once per emote; leaving the block saves the file.
-    Seeding through that same writer, instead of hand-writing the JSON these
-    tests expect to read, is the whole point: if the format the fetcher
-    produces ever stops matching what EmoteStore reads, these tests fail
-    instead of passing against a guess that only exists in the test file.
-
-    This is a synchronous fixture on purpose.  pickledb's methods are "dual"
-    sync/async: they run immediately when no asyncio event loop is running, and
-    return a coroutine when one is.  pytest sets fixtures up before it starts
-    the event loop for an async test, so the sync form works here — calling the
-    same code from inside an async test body would silently write nothing.
-    """
+    """Seed the JSON cache format shared with the emote fetcher."""
     path = tmp_path / "emotes.db"
-    with pickledb.PickleDB(str(path)) as db:
-        for name, urls in _EMOTE_SEED.items():
-            # Discard the return value: outside an event loop set() has already
-            # done the work and hands back a plain bool, not an awaitable
-            _ = db.set(name, urls)
+    path.write_text(json.dumps(_EMOTE_SEED))
     return str(path)
 
 
 class TestVoiceStore:
+    async def test_repeated_cancellation_cannot_publish_an_older_snapshot(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from voxer import stores
+
+        original_write = stores._write_json
+        started = asyncio.Event()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+        snapshots = []
+
+        def delayed_write(path, values):
+            if "second" not in values:
+                loop.call_soon_threadsafe(started.set)
+                assert release.wait(5)
+            original_write(path, values)
+            snapshots.append(dict(values))
+
+        monkeypatch.setattr(stores, "_write_json", delayed_write)
+        path = tmp_path / "voices.json"
+        store = VoiceStore(str(path), ["M1"])
+        first = asyncio.create_task(store.get_or_assign("first"))
+        second = None
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            first.cancel()
+            await asyncio.sleep(0)
+            first.cancel()
+            await asyncio.sleep(0)
+            second = asyncio.create_task(store.get_or_assign("second"))
+            await asyncio.sleep(0)
+            assert not first.done(), "The store must own its writer until it exits"
+            assert not second.done()
+        finally:
+            release.set()
+            await asyncio.gather(
+                first, *([second] if second else []), return_exceptions=True
+            )
+        assert first.cancelled()
+        assert snapshots == [{"first": "M1"}, {"first": "M1", "second": "M1"}]
+        assert json.loads(path.read_text()) == snapshots[-1]
+
+    async def test_returning_user_retries_failed_assignment_write(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from voxer import stores
+
+        original_write = stores._write_json
+        attempts = 0
+
+        def transient_failure(path, values):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("temporary disk failure")
+            original_write(path, values)
+
+        monkeypatch.setattr(stores, "_write_json", transient_failure)
+        monkeypatch.setattr(stores, "VOICE_RETRY_INTERVAL_SECS", 0)
+        path = tmp_path / "voices.json"
+        store = VoiceStore(str(path), ["M1", "F1"])
+        await store.load()
+        assigned = await store.get_or_assign("alice")
+        assert not path.exists()
+        assert await store.get_or_assign("alice") == assigned
+        assert json.loads(path.read_text()) == {"alice": assigned}
+        assert attempts == 2
+
+    async def test_persistent_write_failures_back_off_but_shutdown_retries(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from voxer import stores
+
+        attempts = 0
+
+        def disk_failure(path, values):
+            nonlocal attempts
+            attempts += 1
+            raise OSError("disk unavailable")
+
+        monkeypatch.setattr(stores, "_write_json", disk_failure)
+        monkeypatch.setattr(stores, "VOICE_RETRY_INTERVAL_SECS", 60)
+        store = VoiceStore(str(tmp_path / "voices.json"), ["M1"])
+        await store.load()
+        for _ in range(10):
+            assert await store.get_or_assign("alice") == "M1"
+        assert attempts == 1
+        await store.flush()
+        assert attempts == 2
+
+    async def test_case_changes_keep_the_same_assignment(
+        self, voice_store: VoiceStore
+    ) -> None:
+        await voice_store.load()
+        first = await voice_store.get_or_assign("Alice")
+        assert await voice_store.get_or_assign("alice") == first
+
+    async def test_full_store_preserves_existing_users(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from voxer import stores
+
+        monkeypatch.setattr(stores, "MAX_VOICE_USERS", 1)
+        path = tmp_path / "voices.json"
+        store = VoiceStore(str(path), ["M1", "F1"])
+        await store.load()
+        existing = await store.get_or_assign("first")
+        fallback = await store.get_or_assign("new")
+        assert await store.get_or_assign("new") == fallback
+        assert json.loads(path.read_text()) == {"first": existing}
+
+    async def test_atomic_save_failure_preserves_previous_file(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from voxer import stores
+
+        path = tmp_path / "voices.json"
+        store = VoiceStore(str(path), ["M1"])
+        await store.load()
+        await store.get_or_assign("first")
+
+        def failed_replace(source, destination):
+            raise OSError("disk failure")
+
+        monkeypatch.setattr(stores.os, "replace", failed_replace)
+        assert await store.get_or_assign("second") == "M1"
+        assert json.loads(path.read_text()) == {"first": "M1"}
+        assert list(tmp_path.glob("*.tmp")) == []
+
     def test_empty_pool_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError):
             VoiceStore(str(tmp_path / "voices.json"), [])
@@ -112,6 +225,57 @@ class TestVoiceStore:
 
 
 class TestAnnounceTracker:
+    @pytest.mark.parametrize(
+        "bad",
+        [float("nan"), float("inf"), float("-inf"), {"nested": float("nan")}, True],
+    )
+    async def test_unaccessed_invalid_timestamp_cannot_poison_checkpoint(
+        self, tmp_path, bad
+    ) -> None:
+        path = tmp_path / "ts.json"
+        path.write_text(json.dumps({"healthy": str(time.time()), "bad": bad}))
+        tracker = AnnounceTracker(str(path), window_secs=300)
+        await tracker.load()
+        assert await tracker.claim("healthy") is False
+        await tracker.flush()
+        values = json.loads(path.read_text())
+        assert set(values) == {"healthy"}
+        assert float(values["healthy"]) > 0
+
+    async def test_flush_persists_batched_timestamps(self, tmp_path) -> None:
+        path = tmp_path / "ts.json"
+        tracker = AnnounceTracker(str(path), window_secs=300)
+        await tracker.load()
+        await tracker.claim("Alice")
+        assert not path.exists()
+        await tracker.flush()
+        fresh = AnnounceTracker(str(path), window_secs=300)
+        await fresh.load()
+        assert await fresh.claim("alice") is False
+
+    @pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "9999999999999"])
+    async def test_nonfinite_or_future_timestamp_self_heals(
+        self, tmp_path, bad
+    ) -> None:
+        path = tmp_path / "ts.json"
+        path.write_text(json.dumps({"alice": bad}))
+        tracker = AnnounceTracker(str(path), window_secs=300)
+        await tracker.load()
+        assert await tracker.claim("alice") is True
+        assert await tracker.claim("alice") is False
+
+    async def test_timestamp_cache_is_bounded(self, tmp_path, monkeypatch) -> None:
+        from voxer import stores
+
+        monkeypatch.setattr(stores, "MAX_ANNOUNCE_USERS", 2)
+        path = tmp_path / "ts.json"
+        tracker = AnnounceTracker(str(path), window_secs=300)
+        await tracker.load()
+        for username in ["one", "two", "three"]:
+            await tracker.claim(username)
+        await tracker.flush()
+        assert set(json.loads(path.read_text())) == {"two", "three"}
+
     async def test_first_message_claims(self, tmp_path: Path) -> None:
         tracker = AnnounceTracker(str(tmp_path / "ts.json"), window_secs=300)
         await tracker.load()
@@ -166,11 +330,7 @@ class TestAnnounceTracker:
         forever with nothing but a repeating traceback to explain it.
         """
         path = str(tmp_path / "ts.json")
-        seed = pickledb.PickleDB(path)
-        # Inside an async test pickledb's dual sync/async methods return
-        # awaitables, so these must be awaited or nothing reaches the file
-        await seed.set("alice", junk)
-        await seed.save()
+        Path(path).write_text(json.dumps({"alice": junk}))
 
         tracker = AnnounceTracker(path, window_secs=300)
         await tracker.load()
@@ -185,6 +345,24 @@ class TestAnnounceTracker:
 
 
 class TestEmoteStore:
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            42,
+            "string",
+            [],
+            {"url_2x": 42},
+            {"url_2x": "javascript:alert(1)"},
+            {"url_2x": "https://[bad"},
+        ],
+    )
+    async def test_malformed_emotes_are_ignored(self, tmp_path, entry) -> None:
+        path = tmp_path / "emotes.json"
+        path.write_text(json.dumps({"Broken": entry}))
+        store = EmoteStore(str(path))
+        await store.load()
+        assert store.lookup("Broken") is None
+
     async def test_load_reads_every_seeded_emote(self, emote_db_path: str) -> None:
         store = EmoteStore(emote_db_path)
         await store.load()

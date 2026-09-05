@@ -1,5 +1,7 @@
 """Unit tests for the pure text-processing rules in voxer.textnorm."""
 
+import pytest
+
 from voxer.textnorm import (
     _ABBREVS_EN,
     _ABBREVS_UK,
@@ -27,6 +29,22 @@ class TestIsBot:
 
 
 class TestNormalize:
+    def test_raw_engine_tags_cannot_reach_synthesis(self) -> None:
+        assert "<" not in normalize("hello <silence> <speed=99>", "en")
+
+    def test_repeated_laughter_has_a_fixed_expression_budget(self) -> None:
+        result = normalize("lol " * 125, "en")
+        assert result.count("<laugh>") == 3
+
+    def test_expansion_is_bounded(self) -> None:
+        assert len(normalize("icymi " * 83, "en")) <= 1000
+
+    def test_control_characters_are_removed(self) -> None:
+        result = normalize("hello\x00\x1b[31m\u202eevil", "en")
+        assert "\x00" not in result
+        assert "\x1b" not in result
+        assert "\u202e" not in result
+
     def test_url_replaced_en(self) -> None:
         out = normalize("check https://example.com now", "en")
         assert "https://" not in out
@@ -60,6 +78,21 @@ class TestNormalize:
 
 
 class TestExtractEmojis:
+    @pytest.mark.parametrize(
+        ("text", "clean", "names"),
+        [
+            ("a😃\u200d😃b", "ab", ["😃", "😃"]),
+            ("a\ufe0fb", "ab", []),
+            ("a😃\ufe0fb", "ab", ["😃"]),
+            ("hello\u200dworld", "hello\u200dworld", []),
+            ("  👩🏽‍💻hi🇺🇦there❤️‍🔥  ", "hithere", ["👩🏽‍💻", "🇺🇦", "❤️‍🔥"]),
+        ],
+    )
+    def test_tokenization_preserves_text_and_complex_emoji(self, text, clean, names):
+        actual, items = extract_emojis(text)
+        assert actual == clean
+        assert [item.name for item in items] == names
+
     def test_no_emoji(self) -> None:
         clean, items = extract_emojis("hello world")
         assert clean == "hello world"

@@ -2,6 +2,9 @@
 # request never has to be trusted on "it works on my machine".
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -16,6 +19,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -34,18 +38,21 @@ jobs:
       # "--dev" also installs the [dependency-groups] dev tools (ruff, pyright,
       # pytest), which the checks below need.
       - name: Install dependencies
-        run: uv sync --dev
+        run: uv sync --locked --dev
 
       - name: Lint
-        run: uv run ruff check
+        run: uv run --frozen ruff check
 
       # "--check" reports formatting differences instead of rewriting files,
       # which is what you want on a machine with no one to review the rewrite.
       - name: Check formatting
-        run: uv run ruff format --check
+        run: uv run --frozen ruff format --check
 
       - name: Type-check
-        run: uv run pyright
+        run: uv run --frozen pyright
 
       - name: Test
-        run: uv run pytest -q
+        run: uv run --frozen pytest -q
+
+      - name: Test overlay playback
+        run: node tests/test_overlay.cjs

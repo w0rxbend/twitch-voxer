@@ -5,11 +5,11 @@ description = "Twitch chat TTS bot with per-user voice assignment and browser ov
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "aiohttp>=3.14.3,<4",
     "langdetect>=1.0.9",
-    "pickledb>=1.6",
     "python-dotenv>=1.1.1",
     "requests>=2.32",
-    "starlette>=1.0.0",
+    "starlette>=1.3.1,<2",
     "twitchio>=3.2.2",
     "supertonic>=1.2.3",
     "uvicorn[standard]>=0.47.0",

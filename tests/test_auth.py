@@ -121,7 +121,9 @@ class TestRefreshFromTokenFile:
         write_tokens(token_file, {"123": entry("live-token", "refresh-a")})
         # Fully scoped: the stored token can do everything the script needs
         monkeypatch.setattr(
-            fetch_emotes, "validate_token_scopes", lambda s, t: set(fetch_emotes.SCOPES)
+            fetch_emotes,
+            "validate_token_scopes",
+            lambda s, t, **_: set(fetch_emotes.SCOPES),
         )
 
         def no_refresh(session: object, refresh: str) -> None:
@@ -147,7 +149,11 @@ class TestRefreshFromTokenFile:
         monkeypatch.setattr(
             fetch_emotes,
             "validate_token_scopes",
-            lambda s, t: {fetch_emotes.SCOPES[0]},  # one of the two needed
+            lambda s, t, **_: (
+                set(fetch_emotes.SCOPES)
+                if t == "new-token"
+                else {fetch_emotes.SCOPES[0]}
+            ),
         )
         monkeypatch.setattr(
             fetch_emotes,
@@ -161,7 +167,11 @@ class TestRefreshFromTokenFile:
         self, token_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         write_tokens(token_file, {"123": entry("dead-token", "refresh-a")})
-        monkeypatch.setattr(fetch_emotes, "validate_token_scopes", lambda s, t: set())
+        monkeypatch.setattr(
+            fetch_emotes,
+            "validate_token_scopes",
+            lambda s, t, **_: set(fetch_emotes.SCOPES) if t == "new-token" else set(),
+        )
         monkeypatch.setattr(
             fetch_emotes,
             "_refresh_grant",
@@ -178,7 +188,9 @@ class TestRefreshFromTokenFile:
         self, token_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         write_tokens(token_file, {"123": entry("dead-token", "dead-refresh")})
-        monkeypatch.setattr(fetch_emotes, "validate_token_scopes", lambda s, t: set())
+        monkeypatch.setattr(
+            fetch_emotes, "validate_token_scopes", lambda s, t, **_: set()
+        )
         monkeypatch.setattr(fetch_emotes, "_refresh_grant", lambda s, r: None)
         with requests.Session() as session:
             assert fetch_emotes.refresh_from_token_file(session) is None
@@ -187,7 +199,11 @@ class TestRefreshFromTokenFile:
         self, token_file: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         write_tokens(token_file, {"123": entry("dead-token", "refresh-a")})
-        monkeypatch.setattr(fetch_emotes, "validate_token_scopes", lambda s, t: set())
+        monkeypatch.setattr(
+            fetch_emotes,
+            "validate_token_scopes",
+            lambda s, t, **_: set(fetch_emotes.SCOPES) if t == "t" else set(),
+        )
         monkeypatch.setattr(
             fetch_emotes,
             "_refresh_grant",

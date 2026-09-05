@@ -1,45 +1,8 @@
-"""Unit tests for voxer.server: the overlay routes, the WebSocket protocol,
-the broadcast fan-out, the orphaned-audio reaper and the uvicorn signal seam.
-
-Five groups of tests, each driving the code the way production does:
-
-  - `resolve_audio_file` is a pure function, so it is called directly.
-  - The HTTP routes and the WebSocket endpoint are exercised through the real
-    Starlette application with starlette's `TestClient`, which speaks ASGI to
-    the app in a background thread instead of opening a real network socket.
-    That means these tests go through the same routing, the same JSON parsing
-    and the same file deletion as a live OBS browser source does, so they keep
-    holding after the endpoint's internals are rearranged.
-  - `broadcast()` is called directly with hand-written fake sockets, because
-    the behaviours worth pinning (every live client is reached; a client that
-    raises is dropped without stopping the others; a client that accepts
-    nothing is dropped rather than allowed to hold the pipeline up; and the
-    count of clients actually reached, which is what tells the handler whether
-    an MP3 will ever be played) cannot be provoked through a real connection on
-    demand.
-  - `sweep_audio_dir` works on real files in a real temporary directory, with
-    modification times pushed into the past by `os.utime` so a file can be
-    "old" without the test waiting for it to age.  `reap_audio` is started as a
-    real task with a tiny interval and cancelled at the end, the way the
-    composition root's task group cancels it at shutdown.
-  - `_QuietServer.capture_signals()` is called directly and the process's
-    registered signal handlers are read back around it, because the thing being
-    checked is a side effect on the operating system rather than a value.
-
-A note on timing.  `TestClient` hands a WebSocket message to the application
-asynchronously: `send_text` returns as soon as the message is queued, not once
-the server has acted on it.  So instead of asserting straight after the send,
-these tests wait (with a short deadline) for the observable effect — the MP3
-disappearing from disk.  Where a test needs to prove that something did *not*
-happen, it sends a second, valid message afterwards and waits for *that* one to
-take effect: messages on a single socket are processed in order, so once the
-later effect is visible the earlier message has definitely been handled too.
-"""
+"""Regression coverage for overlay access, ownership, resource limits and cleanup."""
 
 import asyncio
 import contextlib
 import json
-import logging
 import os
 import signal
 import time
@@ -49,8 +12,9 @@ from typing import Any
 import pytest
 import uvicorn
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
-from voxer.models import BroadcastEvent, EmoteItem
+from voxer.models import BroadcastEvent, EmoteItem, audio_url_for
 from voxer.server import (
     AudioServer,
     _QuietServer,
@@ -59,622 +23,497 @@ from voxer.server import (
     sweep_audio_dir,
 )
 
-# How long to wait for the server thread to act on a WebSocket message before
-# declaring the test failed.  Generous, because it is only ever paid in full
-# when something is genuinely broken; the happy path returns in milliseconds.
-_DELETION_TIMEOUT_SECONDS = 5.0
-
-# The per-client send deadline every server built here runs with.  Production
-# uses seconds (VOXER_WS_SEND_TIMEOUT, default 5); a quarter of a second is
-# still thousands of times longer than an in-memory fake needs to accept a
-# string, and it is what keeps the stalled-client test quick.
-_TEST_SEND_TIMEOUT = 0.25
-
-# How long the reaper waits between sweeps in the tests below.  Production uses
-# five minutes (VOXER_AUDIO_SWEEP_INTERVAL_SECS); a hundredth of a second keeps
-# these tests instant while exercising exactly the same loop.
-_TEST_REAP_INTERVAL = 0.01
-
-
-def _wait_until_deleted(path: Path) -> bool:
-    """Poll until `path` is gone, returning False if it outlives the deadline."""
-    deadline = time.monotonic() + _DELETION_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if not path.exists():
-            return True
-        time.sleep(0.01)
-    return False
+TOKEN = "test-overlay-token-32-characters-long"
 
 
 @pytest.fixture
 def server(tmp_path: Path) -> AudioServer:
-    """An AudioServer whose audio directory is a fresh temporary directory.
-
-    Host and port are never used: `serve()` is what binds the socket and no
-    test calls it, so nothing here listens on the network.  The send deadline
-    is deliberately tiny so a test can stall a client without stalling itself.
-    """
-    return AudioServer(tmp_path, "127.0.0.1", 0, _TEST_SEND_TIMEOUT)
+    return AudioServer(tmp_path, "127.0.0.1", 0, 0.1, allowed_hosts=("testserver",))
 
 
-# --------------------------------------------------------------------------
-# resolve_audio_file — the path-traversal guard
-# --------------------------------------------------------------------------
+def _event(filename: str = "clip.mp3") -> BroadcastEvent:
+    return BroadcastEvent(
+        f"/audio/{filename}",
+        "chatter",
+        "https://example.invalid/avatar.png",
+        [EmoteItem("Kappa", "https://example.invalid/kappa.png")],
+    )
 
 
-def test_plain_filename_allowed(tmp_path: Path) -> None:
-    resolved = resolve_audio_file(tmp_path, "abc.mp3")
-    assert resolved == tmp_path.resolve() / "abc.mp3"
+def _clip(directory: Path, name: str = "clip.mp3", age: float = 0) -> Path:
+    path = directory / name
+    path.write_bytes(b"audio")
+    if age:
+        then = time.time() - age
+        os.utime(path, (then, then))
+    return path
 
 
-def test_parent_traversal_rejected(tmp_path: Path) -> None:
-    assert resolve_audio_file(tmp_path, "../secret.txt") is None
+def _wait_deleted(path: Path) -> None:
+    deadline = time.monotonic() + 2
+    while path.exists() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not path.exists()
 
 
-def test_absolute_path_rejected(tmp_path: Path) -> None:
-    assert resolve_audio_file(tmp_path, "/etc/passwd") is None
+def _publish(client: TestClient, server: AudioServer, name: str = "clip.mp3") -> int:
+    assert client.portal is not None
+    return client.portal.call(server.broadcast, _event(name))
 
 
-def test_subdirectory_rejected(tmp_path: Path) -> None:
-    assert resolve_audio_file(tmp_path, "sub/dir.mp3") is None
+@pytest.mark.parametrize(
+    "name",
+    [
+        "../secret.txt",
+        "/etc/passwd",
+        "sub/clip.mp3",
+        "a/../clip.mp3",
+        "notes.txt",
+        "",
+        "x\x00.mp3",
+        "x\\clip.mp3",
+        None,
+        42,
+        [],
+        {},
+    ],
+)
+def test_invalid_audio_names_rejected(tmp_path: Path, name: object) -> None:
+    assert resolve_audio_file(tmp_path, name) is None
 
 
-def test_deep_traversal_rejected(tmp_path: Path) -> None:
-    assert resolve_audio_file(tmp_path, "../../../../etc/passwd") is None
-
-
-# --------------------------------------------------------------------------
-# The WebSocket endpoint — steps 4 and 5 of the audio-file lifecycle
-# --------------------------------------------------------------------------
-
-
-def test_done_message_deletes_the_audio_file(
-    server: AudioServer, tmp_path: Path
-) -> None:
-    """The confirmation the browser sends after playback removes the MP3.
-
-    This is the last step of the lifecycle described in the module docstring
-    of voxer/server.py, and the reason the audio directory does not fill up.
-    """
-    clip = tmp_path / "a.mp3"
-    clip.write_bytes(b"fake mp3 bytes")
-
+@pytest.mark.parametrize(
+    "name", ["clip.mp3", "_clip.mp3", "-clip.mp3", "a" * 128 + ".mp3"]
+)
+def test_generated_audio_urls_can_be_served(server, tmp_path, name) -> None:
+    _clip(tmp_path, name)
     with TestClient(server._app) as client:
-        with client.websocket_connect("/ws") as ws:
-            ws.send_text(json.dumps({"done": "a.mp3"}))
-            assert _wait_until_deleted(clip)
+        assert client.get(audio_url_for(name)).content == b"audio"
 
 
-def test_last_client_leaving_releases_the_outstanding_clips(
+@pytest.mark.parametrize(
+    "name", ["clip.v2.mp3", "../clip.mp3", "a" * 129 + ".mp3", "clip.mp3\n"]
+)
+def test_domain_rejects_names_the_server_cannot_deliver(tmp_path, name) -> None:
+    with pytest.raises(ValueError):
+        audio_url_for(name)
+    assert resolve_audio_file(tmp_path, name) is None
+
+
+def test_plain_mp3_and_symlink_rules(tmp_path: Path) -> None:
+    path = _clip(tmp_path)
+    assert resolve_audio_file(tmp_path, path.name) == path.resolve()
+    alias = tmp_path / "alias.mp3"
+    alias.symlink_to(path)
+    assert resolve_audio_file(tmp_path, alias.name) is None
+
+
+@pytest.mark.parametrize(
+    "path", ["/", "/simple", "/static/overlay.js", "/audio/clip.mp3"]
+)
+def test_auth_protects_every_overlay_resource(tmp_path: Path, path: str) -> None:
+    _clip(tmp_path)
+    protected = AudioServer(tmp_path, "127.0.0.1", 0, 0.1, overlay_token=TOKEN)
+    with TestClient(protected._app, base_url="http://127.0.0.1") as client:
+        assert client.get(path).status_code == 401
+        assert (
+            client.get(path, headers={"Authorization": f"Bearer {TOKEN}"}).status_code
+            == 200
+        )
+        assert (
+            client.get(path, headers={"Authorization": "Bearer wrong"}).status_code
+            == 401
+        )
+
+
+def test_bootstrap_cookie_redirect_and_minimal_health(tmp_path: Path) -> None:
+    protected = AudioServer(tmp_path, "127.0.0.1", 0, 0.1, overlay_token=TOKEN)
+    with TestClient(protected._app, base_url="http://127.0.0.1") as client:
+        assert client.get("/healthz").text == "ok"
+        assert client.get("/?token=wrong").status_code == 401
+        response = client.get(
+            f"/simple?volume=0.4&token={TOKEN}&debug=1", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/simple?volume=0.4&debug=1"
+        assert "HttpOnly" in response.headers["set-cookie"]
+        assert "SameSite=strict" in response.headers["set-cookie"]
+        assert "Secure" not in response.headers["set-cookie"]
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert client.get("/simple").status_code == 200
+        with client.websocket_connect(
+            "ws://127.0.0.1/ws", headers={"Origin": "http://127.0.0.1"}
+        ):
+            assert protected.has_clients
+
+
+def test_https_bootstrap_cookie_is_secure(tmp_path: Path) -> None:
+    protected = AudioServer(tmp_path, "127.0.0.1", 0, 0.1, overlay_token=TOKEN)
+    with TestClient(protected._app, base_url="https://127.0.0.1") as client:
+        response = client.get(f"/?token={TOKEN}", follow_redirects=False)
+        assert "Secure" in response.headers["set-cookie"]
+        with client.websocket_connect(
+            "wss://127.0.0.1/ws", headers={"Origin": "https://127.0.0.1"}
+        ):
+            assert protected.has_clients
+
+
+def test_host_and_origin_reject_rebinding_and_cross_site_requests(
     server: AudioServer,
 ) -> None:
-    """When nobody is connected, an outstanding clip is an abandoned one.
-
-    Outstanding names are held so the reaper does not delete a clip a browser
-    is still going to play.  Once the last overlay disconnects, no "done"
-    message can ever arrive for those names, so holding them would protect
-    those files from the reaper for the rest of the process's life -- the exact
-    leak the reaper exists to close.
-    """
     with TestClient(server._app) as client:
-        with client.websocket_connect("/ws"):
-            server._outstanding.add("queued.mp3")
-        # Leaving the `with` block closes the socket; the endpoint's cleanup
-        # runs on the server side, so give it a moment to be observed.
-        deadline = time.time() + 5
-        while server._outstanding and time.time() < deadline:
-            time.sleep(0.01)
-
-    assert server.outstanding_files() == frozenset()
-
-
-def test_done_message_with_traversal_leaves_outside_file_alone(
-    server: AudioServer, tmp_path: Path
-) -> None:
-    """A filename pointing outside the audio directory deletes nothing.
-
-    The filename comes from the browser, so a compromised or hostile overlay
-    could ask for any path on disk.  The connection deliberately stays open
-    after the rejection — a bad name is a bad message, not a bad client — which
-    is what the follow-up `done` proves.
-    """
-    outside = tmp_path.parent / "secret.txt"
-    outside.write_text("do not delete me")
-    clip = tmp_path / "b.mp3"
-    clip.write_bytes(b"fake mp3 bytes")
-
-    try:
-        with TestClient(server._app) as client:
-            with client.websocket_connect("/ws") as ws:
-                ws.send_text(json.dumps({"done": "../secret.txt"}))
-                # Messages on one socket are handled in order, so once this
-                # second deletion has happened the first message is long done.
-                ws.send_text(json.dumps({"done": "b.mp3"}))
-                assert _wait_until_deleted(clip)
-                assert outside.exists()
-    finally:
-        outside.unlink(missing_ok=True)
+        assert client.get("/", headers={"Host": "evil.example"}).status_code == 400
+        assert (
+            client.get("/", headers={"Host": "testserver:invalid"}).status_code == 400
+        )
+        assert (
+            client.get("/healthz", headers={"Host": "evil.example"}).status_code == 400
+        )
+        assert (
+            client.get("/", headers={"Origin": "https://evil.example"}).status_code
+            == 403
+        )
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(
+                "/ws", headers={"Origin": "https://evil.example"}
+            ):
+                pytest.fail("cross-site socket accepted")
 
 
-@pytest.mark.parametrize("garbage", ["not json", "42", "null", "[1]"])
-def test_garbage_message_does_not_kill_the_connection(
-    server: AudioServer, tmp_path: Path, garbage: str
-) -> None:
-    """Unparseable or non-object messages are logged and skipped, not fatal.
-
-    "not json" fails to parse at all; "42", "null" and "[1]" parse into a
-    number, None and a list respectively — all valid JSON, none of them
-    something `.get("done")` can be called on.  Before either guard existed
-    such a message raised inside the endpoint and tore down that client's
-    connection, so the overlay went silent until the page was reloaded.
-    """
-    clip = tmp_path / "c.mp3"
-    clip.write_bytes(b"fake mp3 bytes")
-
-    with TestClient(server._app) as client:
-        with client.websocket_connect("/ws") as ws:
-            ws.send_text(garbage)
-            ws.send_text(json.dumps({"done": "c.mp3"}))
-            assert _wait_until_deleted(clip)
-
-
-# --------------------------------------------------------------------------
-# The HTTP routes the OBS browser source loads
-# --------------------------------------------------------------------------
+def test_ws_requires_cookie_or_bearer_not_query_token(tmp_path: Path) -> None:
+    protected = AudioServer(
+        tmp_path,
+        "127.0.0.1",
+        0,
+        0.1,
+        overlay_token=TOKEN,
+        allowed_hosts=("testserver",),
+    )
+    with TestClient(protected._app) as client:
+        for path in ("/ws", f"/ws?token={TOKEN}"):
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect(path):
+                    pytest.fail("unauthenticated socket accepted")
+        with client.websocket_connect(
+            "/ws", headers={"Authorization": f"Bearer {TOKEN}"}
+        ):
+            assert protected.has_clients
 
 
 @pytest.mark.parametrize("path", ["/", "/simple"])
-def test_overlay_pages_are_served_uncacheable(server: AudioServer, path: str) -> None:
-    """Both overlay pages load, and neither may be cached.
-
-    OBS keeps its own HTTP cache, and a cached page keeps running the old
-    overlay JavaScript after an update, so `Cache-Control: no-store` is part
-    of the contract rather than an incidental header.
-    """
+def test_overlay_pages_are_uncacheable_with_local_script_policy(
+    server: AudioServer, path: str
+) -> None:
     with TestClient(server._app) as client:
         response = client.get(path)
-
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+    assert "script-src 'self';" in response.headers["content-security-policy"]
+    assert "https://esm.sh" not in response.text
+    assert "https://cdn.jsdelivr.net/npm/pixi" not in response.text
+    assert "'unsafe-eval'" not in response.headers["content-security-policy"]
 
 
-def test_favicon_is_served(server: AudioServer) -> None:
-    """/favicon.ico answers so the browser does not log a 404 on every load."""
+@pytest.mark.parametrize("path", ["/", "/simple"])
+def test_overlay_executable_code_is_local_and_external(server, path):
+    from html.parser import HTMLParser
+
+    class Assets(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.scripts = []
+
+        def handle_starttag(self, tag, attrs):
+            assert not any(name.startswith("on") for name, _ in attrs)
+            if tag == "script":
+                src = dict(attrs).get("src")
+                assert src and src.startswith("/static/")
+                self.scripts.append(src)
+
+    parser = Assets()
     with TestClient(server._app) as client:
-        response = client.get("/favicon.ico")
+        parser.feed(client.get(path).text)
+        assert "/static/overlay.js" in parser.scripts
+        for src in parser.scripts:
+            assert client.get(src).status_code == 200
 
-    assert response.status_code == 200
+
+def test_audio_route_excludes_non_audio_files_and_links(
+    server: AudioServer, tmp_path: Path
+) -> None:
+    (tmp_path / "secret.txt").write_text("private")
+    (tmp_path / "alias.mp3").symlink_to(tmp_path / "secret.txt")
+    _clip(tmp_path)
+    with TestClient(server._app) as client:
+        assert client.get("/audio/secret.txt").status_code == 404
+        assert client.get("/audio/alias.mp3").status_code == 404
+        assert client.get("/audio/clip.mp3").content == b"audio"
+        assert client.get("/favicon.ico").status_code == 200
 
 
-# --------------------------------------------------------------------------
-# broadcast() — the fan-out to every connected overlay
-# --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "not json",
+        "42",
+        "null",
+        "[1]",
+        '{"done":42}',
+        '{"done":[]}',
+        '{"done":{}}',
+        '{"done":"../secret.txt"}',
+    ],
+)
+def test_invalid_ack_cannot_delete_unowned_file_or_kill_socket(
+    server: AudioServer, tmp_path: Path, garbage: str
+) -> None:
+    owned = _clip(tmp_path)
+    unrelated = _clip(tmp_path, "unrelated.mp3")
+    with TestClient(server._app) as client:
+        with client.websocket_connect("/ws") as ws:
+            assert _publish(client, server) == 1
+            ws.receive_json()
+            ws.send_text(garbage)
+            ws.send_json({"done": unrelated.name})
+            ws.send_json({"done": owned.name})
+            _wait_deleted(owned)
+            assert unrelated.exists()
+
+
+def test_two_clients_must_both_acknowledge(server: AudioServer, tmp_path: Path) -> None:
+    clip = _clip(tmp_path)
+    with TestClient(server._app) as client:
+        with (
+            client.websocket_connect("/ws") as first,
+            client.websocket_connect("/ws") as second,
+        ):
+            assert _publish(client, server) == 2
+            first.receive_json()
+            second.receive_json()
+            first.send_json({"done": clip.name})
+            # A subsequent broadcast is observed after the first ACK is sent;
+            # the fake-socket race regression below pins exact registration order.
+            time.sleep(0.02)
+            assert clip.exists()
+            second.send_json({"done": clip.name})
+            _wait_deleted(clip)
+
+
+def test_disconnect_releases_only_that_clients_receipts(
+    server: AudioServer, tmp_path: Path
+) -> None:
+    clip = _clip(tmp_path)
+    with TestClient(server._app) as client:
+        with client.websocket_connect("/ws") as first:
+            with client.websocket_connect("/ws") as second:
+                assert _publish(client, server) == 2
+                first.receive_json()
+                second.receive_json()
+            assert clip.exists()
+        _wait_deleted(clip)
+    assert not server.has_clients
+    assert server.outstanding_files() == frozenset()
+
+
+def test_ws_frame_and_rate_bounds(server: AudioServer) -> None:
+    with TestClient(server._app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_text("x" * 1025)
+            with pytest.raises(WebSocketDisconnect) as error:
+                ws.receive_text()
+            assert error.value.code == 1009
+        with client.websocket_connect("/ws") as ws:
+            for _ in range(129):
+                ws.send_text("{}")
+            with pytest.raises(WebSocketDisconnect) as error:
+                ws.receive_text()
+            assert error.value.code == 1008
+
+
+def test_ws_connection_limit(tmp_path: Path) -> None:
+    limited = AudioServer(
+        tmp_path, "127.0.0.1", 0, 0.1, allowed_hosts=("testserver",), max_clients=1
+    )
+    with TestClient(limited._app) as client:
+        with client.websocket_connect("/ws"):
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect("/ws"):
+                    pytest.fail("connection limit exceeded")
 
 
 class FakeSocket:
-    """A stand-in for a connected WebSocket, recording what was sent to it.
-
-    `broadcast()` only ever calls `send_text` on a client, so that single
-    method is the whole surface a fake needs.  With `raises=True` the socket
-    behaves like one whose browser vanished between two messages: the send
-    blows up, which is the case broadcast() has to survive.
-    """
-
-    def __init__(self, *, raises: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, stall: bool = False) -> None:
         self.sent: list[str] = []
-        self._raises = raises
-
-    async def send_text(self, message: str) -> None:
-        if self._raises:
-            raise RuntimeError("socket is closed")
-        self.sent.append(message)
-
-
-class StalledSocket:
-    """A client that is still connected but has stopped reading its socket.
-
-    This is what a paused OBS browser source or a suspended laptop looks like
-    from the server: nothing raises and nothing closes, the send just never
-    finishes.  `asyncio.Event().wait()` reproduces that exactly — it blocks
-    forever and, unlike `time.sleep`, yields to the event loop so the rest of
-    the broadcast can be observed while this one client hangs.
-    """
-
-    def __init__(self) -> None:
+        self.fail = fail
+        self.stall = stall
         self.closed = False
+        self.received = asyncio.Event()
+        self.on_send: Any = None
 
     async def send_text(self, message: str) -> None:
-        await asyncio.Event().wait()
+        if self.fail:
+            raise RuntimeError("disconnected")
+        if self.stall:
+            await asyncio.Event().wait()
+        self.sent.append(message)
+        self.received.set()
+        if self.on_send:
+            self.on_send()
 
     async def close(self) -> None:
         self.closed = True
 
 
-def _event() -> BroadcastEvent:
-    return BroadcastEvent(
-        audio_url="/audio/clip.mp3",
-        username="chatter",
-        avatar_url="https://example.invalid/avatar.png",
-        emotes=[EmoteItem(name="Kappa", url="https://example.invalid/kappa.png")],
-    )
-
-
-async def test_broadcast_reaches_every_connected_client(server: AudioServer) -> None:
-    """Every live client receives the same JSON payload, nested emotes included."""
-    first, second = FakeSocket(), FakeSocket()
-    # The client set is populated by the WebSocket endpoint in production;
-    # here it is filled by hand because broadcast() only duck-types its
-    # members, calling send_text and nothing else.
-    server._clients = {first, second}
-
-    delivered = await server.broadcast(_event())
-
-    assert delivered == 2
-
-    expected: dict[str, Any] = {
-        "audio_url": "/audio/clip.mp3",
-        "username": "chatter",
-        "avatar_url": "https://example.invalid/avatar.png",
-        "emotes": [{"name": "Kappa", "url": "https://example.invalid/kappa.png"}],
-    }
-    assert [json.loads(payload) for payload in first.sent] == [expected]
-    assert [json.loads(payload) for payload in second.sent] == [expected]
-
-
-async def test_broadcast_drops_a_raising_client_and_still_serves_the_rest(
-    server: AudioServer,
-) -> None:
-    """One dead socket neither hides the message from the others nor lingers.
-
-    Two things matter here.  The healthy client must still get its message,
-    which is why the removal is collected during the loop rather than raising
-    out of it; and the dead client must be gone from the set afterwards, so
-    the next broadcast does not pay for it again.
-    """
-    dead, alive = FakeSocket(raises=True), FakeSocket()
-    server._clients = {dead, alive}
-
-    delivered = await server.broadcast(_event())
-
-    assert delivered == 1
-    assert len(alive.sent) == 1
-    assert server._clients == {alive}
-
-
-async def test_broadcast_with_no_clients_reports_zero_deliveries(
-    server: AudioServer,
-) -> None:
-    """With nothing connected, broadcasting is harmless and reports 0 reached.
-
-    This is the common case while the stream is offline but the bot is running,
-    and the zero is load-bearing rather than cosmetic: it is what tells
-    MessageHandler that no browser will ever send back the "done" message for
-    this clip, so the MP3 has to be deleted at the source instead of being left
-    in the audio directory for nobody.
-    """
-    delivered = await server.broadcast(_event())
-
-    assert delivered == 0
-    assert server._clients == set()
-
-
-async def test_broadcast_drops_a_stalled_client_and_still_serves_the_rest(
-    server: AudioServer,
-) -> None:
-    """A client that accepts nothing is given up on, not waited for.
-
-    Clients are served one after another, and broadcast() is awaited from the
-    single task that drains the message queue, so a browser that stops reading
-    its socket used to hold up the entire bot: no exception was raised and no
-    connection was closed, the send simply never completed.  Chat kept arriving,
-    the bounded queue filled, and messages were dropped with nothing logged to
-    say why.  Now the send has a deadline, and missing it costs that one client
-    its connection and nothing else.
-
-    The whole call is wrapped in a deadline of its own.  Without it, a
-    regression here would hang the test suite instead of failing it — the exact
-    failure mode this test exists to prevent.
-    """
-    stalled, alive = StalledSocket(), FakeSocket()
-    server._clients = {stalled, alive}
-
-    async with asyncio.timeout(_TEST_SEND_TIMEOUT * 20):
-        delivered = await server.broadcast(_event())
-
-    # The healthy client is served whichever order the set happens to iterate in
-    assert delivered == 1
-    assert len(alive.sent) == 1
-    assert server._clients == {alive}
-    # Closed as well as forgotten, so the endpoint holding that connection
-    # finishes instead of sitting in receive_text() until uvicorn's keepalive
-    # eventually notices.
-    assert stalled.closed
-
-
-# --------------------------------------------------------------------------
-# sweep_audio_dir / reap_audio — clearing up clips nobody came back for
-# --------------------------------------------------------------------------
-
-
-def _mp3(directory: Path, name: str, *, age_secs: float = 0.0) -> Path:
-    """Create an MP3-named file and, optionally, backdate it.
-
-    The reaper decides what to delete from a file's modification time, so a
-    test needs files of a given age.  Waiting for one to get old would make the
-    suite slow, so `os.utime` rewrites the timestamp instead: it is the same
-    number `Path.stat().st_mtime` reports either way.
-    """
-    path = directory / name
-    path.write_bytes(b"not really audio")
-    if age_secs:
-        past = time.time() - age_secs
-        os.utime(path, (past, past))
-    return path
-
-
-def test_sweep_with_no_minimum_age_takes_every_file(tmp_path: Path) -> None:
-    """This is the sweep at startup: nothing is playing, so nothing is spared.
-
-    A brand-new file would survive any real age cutoff, which is exactly wrong
-    here — the process that could have been playing it died with the previous
-    run, so it is rubbish however recently it was written.
-    """
-    just_written = _mp3(tmp_path, "fresh.mp3")
-    long_dead = _mp3(tmp_path, "old.mp3", age_secs=3600)
-
-    removed = sweep_audio_dir(tmp_path)
-
-    assert removed == 2
-    assert not just_written.exists()
-    assert not long_dead.exists()
-
-
-def test_sweep_deletes_only_the_files_past_the_cutoff(tmp_path: Path) -> None:
-    """With a minimum age, an abandoned clip goes and a current one stays.
-
-    The sparing half is the one that matters most.  A file written seconds ago
-    may still be queued for synthesis, on its way to a browser, or playing
-    right now, and deleting it would cut the clip off mid-word — which is why
-    the shipped cutoff (five minutes) is far longer than any clip can live.
-    """
-    abandoned = _mp3(tmp_path, "abandoned.mp3", age_secs=600)
-    playing_now = _mp3(tmp_path, "playing.mp3")
-
-    removed = sweep_audio_dir(tmp_path, min_age_secs=300)
-
-    assert removed == 1
-    assert not abandoned.exists()
-    assert playing_now.exists()
-
-
-def test_sweep_spares_a_clip_the_overlay_still_owes_a_done_message(
-    tmp_path: Path,
-) -> None:
-    """An outstanding clip survives however old it looks.
-
-    Age is only a guess at "nobody is coming back for this", and it is a bad
-    guess while a browser is holding the clip: the overlay plays one at a time
-    and keeps a queue, and a tab that has not been clicked yet is not allowed
-    to play audio at all, so a legitimately outstanding clip can easily be
-    older than the five-minute cutoff.  Deleting it would break the overlay's
-    promise that every broadcast clip stays fetchable until it is played.
-    """
-    outstanding = _mp3(tmp_path, "queued.mp3", age_secs=600)
-    abandoned = _mp3(tmp_path, "forgotten.mp3", age_secs=600)
-
-    removed = sweep_audio_dir(tmp_path, min_age_secs=300, spare={"queued.mp3"})
-
-    assert removed == 1
-    assert outstanding.exists()
-    assert not abandoned.exists()
-
-
-async def test_broadcast_marks_a_delivered_clip_outstanding(
-    server: AudioServer,
-) -> None:
-    """A clip a browser accepted is protected from the reaper until it is played."""
-    server._clients = {FakeSocket()}
-
-    await server.broadcast(_event())
-
-    assert server.outstanding_files() == frozenset({"clip.mp3"})
-
-    # The "done" message is the browser saying it finished, so the protection
-    # ends there — the file is deleted anyway, and must not be spared forever.
-    server._delete_played_audio("clip.mp3")
-    assert server.outstanding_files() == frozenset()
-
-
-async def test_broadcast_that_reached_nobody_marks_nothing_outstanding(
-    server: AudioServer,
-) -> None:
-    """With no client there is no "done" message to wait for.
-
-    MessageHandler deletes the file itself in this case (broadcast returns 0),
-    so sparing it would leave the reaper guarding a name that no longer exists.
-    """
+async def test_fanout_serialization_and_zero_clients(server: AudioServer) -> None:
     assert await server.broadcast(_event()) == 0
-    assert server.outstanding_files() == frozenset()
+    first, second = FakeSocket(), FakeSocket()
+    server._clients = {first, second}
+    assert await server.broadcast(_event()) == 2
+    assert first.sent == second.sent
+    assert json.loads(first.sent[0])["emotes"] == [
+        {"name": "Kappa", "url": "https://example.invalid/kappa.png"}
+    ]
 
 
-def test_sweep_leaves_files_that_are_not_mp3s_alone(tmp_path: Path) -> None:
-    """Only *.mp3 is swept, so a directory shared with anything else is safe.
-
-    audio_dir holds nothing but generated clips today, but it is a configurable
-    path (VOXER_AUDIO_DIR) that somebody could point at a directory of their
-    own, and a sweep that deleted whatever it found there would be a nasty
-    surprise.
-    """
-    keep = tmp_path / "notes.txt"
-    keep.write_text("not mine to delete")
-    # Backdated as far as the clip beside it, so the only thing that can save
-    # it is its name.  Left at its real age it would survive on age alone, and
-    # this test would keep passing even if the sweep grabbed every file.
-    past = time.time() - 600
-    os.utime(keep, (past, past))
-    _mp3(tmp_path, "clip.mp3", age_secs=600)
-
-    removed = sweep_audio_dir(tmp_path, min_age_secs=300)
-
-    assert removed == 1
-    assert keep.exists()
+async def test_stalled_clients_are_concurrent_and_healthy_client_is_immediate(
+    server: AudioServer,
+) -> None:
+    alive = FakeSocket()
+    stalled = [FakeSocket(stall=True) for _ in range(4)]
+    failed = FakeSocket(fail=True)
+    server._clients = {alive, failed, *stalled}
+    task = asyncio.create_task(server.broadcast(_event()))
+    async with asyncio.timeout(0.07):
+        await alive.received.wait()
+    async with asyncio.timeout(0.25):
+        assert await task == 1
+    assert server._clients == {alive}
+    assert all(socket.closed for socket in [failed, *stalled])
 
 
-def test_sweep_of_a_directory_that_does_not_exist_removes_nothing(
+async def test_fast_ack_cannot_delete_before_other_delivery(
+    server: AudioServer, tmp_path: Path
+) -> None:
+    clip = _clip(tmp_path)
+    fast, other = FakeSocket(), FakeSocket()
+    fast.on_send = lambda: server._delete_played_audio(clip.name, fast)
+    server._clients = {fast, other}
+    assert await server.broadcast(_event()) == 2
+    assert clip.exists()
+    server._delete_played_audio(clip.name, other)
+    assert not clip.exists()
+
+
+async def test_nonrecipient_cannot_acknowledge_clip(
+    server: AudioServer, tmp_path: Path
+) -> None:
+    clip = _clip(tmp_path)
+    owner, stranger = FakeSocket(), FakeSocket()
+    server._clients = {owner}
+    await server.broadcast(_event())
+    server._delete_played_audio(clip.name, stranger)
+    assert clip.exists()
+    server._delete_played_audio(clip.name, owner)
+    assert not clip.exists()
+
+
+async def test_pending_capacity_drops_nonacknowledging_client(tmp_path: Path) -> None:
+    limited = AudioServer(tmp_path, "127.0.0.1", 0, 0.1, max_pending_per_client=1)
+    client = FakeSocket()
+    limited._clients = {client}
+    clip = _clip(tmp_path)
+    assert await limited.broadcast(_event()) == 1
+    assert await limited.broadcast(_event("next.mp3")) == 0
+    assert client.closed
+    assert not clip.exists()
+    assert not limited.has_clients
+    assert limited.outstanding_files() == frozenset()
+
+
+async def test_hard_ttl_expires_acked_never_clips_with_connected_client(
     tmp_path: Path,
 ) -> None:
-    """A missing directory is reported as an empty sweep, not an error.
+    limited = AudioServer(tmp_path, "127.0.0.1", 0, 0.1, audio_max_age=5)
+    limited._clients = {FakeSocket()}
+    clip = _clip(tmp_path)
+    await limited.broadcast(_event())
+    limited._outstanding[clip.name].created_at -= 10
+    assert limited.outstanding_files() == frozenset()
+    assert not clip.exists()
+    assert limited.has_clients
 
-    The reaper runs inside the application's task group, where an exception
-    would cancel every sibling task and stop the bot.  Nothing should be able
-    to reach that from a directory somebody deleted underneath us.
-    """
-    assert sweep_audio_dir(tmp_path / "gone", min_age_secs=300) == 0
+
+def test_sweep_age_ownership_and_other_files(tmp_path: Path) -> None:
+    fresh = _clip(tmp_path, "fresh.mp3")
+    old = _clip(tmp_path, "old.mp3", age=600)
+    pending = _clip(tmp_path, "pending.mp3", age=600)
+    other = tmp_path / "notes.txt"
+    other.write_text("keep")
+    assert sweep_audio_dir(tmp_path, 300, {pending.name}) == 1
+    assert not old.exists()
+    assert fresh.exists() and pending.exists() and other.exists()
+    assert sweep_audio_dir(tmp_path) == 2
+    assert other.exists()
+    assert sweep_audio_dir(tmp_path / "missing") == 0
 
 
-async def test_reaper_keeps_deleting_orphans_and_reports_what_it_took(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+async def test_reaper_removes_orphans_without_blocking_event_loop(
+    tmp_path: Path,
 ) -> None:
-    """The timer loop actually sweeps, and says so when it finds something.
-
-    This is the whole point of the reaper: a browser that crashes or is
-    refreshed in the middle of a clip never sends the "done" message that
-    deletes it, so those files used to sit in audio_dir until the next restart.
-    The task is cancelled at the end, which is how the composition root's task
-    group stops it during shutdown.
-    """
-    orphan = _mp3(tmp_path, "orphan.mp3", age_secs=600)
-    caplog.set_level(logging.INFO, logger="voxer.server")
-
-    task = asyncio.create_task(reap_audio(tmp_path, _TEST_REAP_INTERVAL, 300))
+    orphan = _clip(tmp_path, age=600)
+    task = asyncio.create_task(reap_audio(tmp_path, 0.005, 300))
     try:
-        async with asyncio.timeout(_DELETION_TIMEOUT_SECONDS):
+        async with asyncio.timeout(2):
             while orphan.exists():
-                await asyncio.sleep(_TEST_REAP_INTERVAL)
+                await asyncio.sleep(0.005)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
-
     assert not orphan.exists()
-    assert "Reaped 1 orphaned audio file(s)" in caplog.text
 
 
-async def test_reaper_says_nothing_when_there_is_nothing_to_reap(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A sweep that deletes nothing is silent, which is nearly every sweep.
-
-    The loop runs for as long as the bot does, every few minutes.  Logging each
-    pass would fill the log with lines that carry no information and bury the
-    ones an operator is actually reading.
-    """
-    playing_now = _mp3(tmp_path, "playing.mp3")
-    caplog.set_level(logging.INFO, logger="voxer.server")
-
-    task = asyncio.create_task(reap_audio(tmp_path, _TEST_REAP_INTERVAL, 300))
-    # Long enough for several sweeps to have come and gone.
-    await asyncio.sleep(_TEST_REAP_INTERVAL * 5)
-    task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-
-    assert playing_now.exists()
-    assert caplog.records == []
+def test_quiet_server_keeps_application_signal_handlers() -> None:
+    signals = (signal.SIGINT, signal.SIGTERM)
+    before = {sig: signal.getsignal(sig) for sig in signals}
+    config = uvicorn.Config(lambda *args: None, log_config=None)
+    with _QuietServer(config).capture_signals():
+        assert {sig: signal.getsignal(sig) for sig in signals} == before
+    assert {sig: signal.getsignal(sig) for sig in signals} == before
 
 
-# --------------------------------------------------------------------------
-# _QuietServer — keeping uvicorn's hands off the process's signal handlers
-# --------------------------------------------------------------------------
-
-# The two signals uvicorn takes over by default, and the two the composition
-# root (voxer/app.py) installs its own handlers for: SIGINT is Ctrl-C, SIGTERM
-# is what `docker stop` and most process supervisors send.
-_SHUTDOWN_SIGNALS = (signal.SIGINT, signal.SIGTERM)
-
-
-async def _null_app(scope: Any, receive: Any, send: Any) -> None:
-    """An ASGI application that does nothing, to satisfy uvicorn.Config.
-
-    uvicorn.Config insists on being given an application, but the tests below
-    never start the server — they only call capture_signals() — so the
-    application is never invoked.  `log_config=None` stops Config's constructor
-    from reconfiguring Python's logging for the rest of the test session.
-    """
-
-
-def _config() -> uvicorn.Config:
-    return uvicorn.Config(_null_app, log_config=None)
-
-
-def test_quiet_server_leaves_the_process_signal_handlers_alone() -> None:
-    """_QuietServer.capture_signals() must install nothing and restore nothing.
-
-    This is the seam that lets voxer/app.py own shutdown.  Stock uvicorn
-    replaces the SIGINT/SIGTERM handlers for as long as its server runs and
-    re-sends the signal it caught afterwards, which used to kill this process
-    from inside one task before the others could shut down (see _QuietServer's
-    own docstring).  Overriding the method is a small change that is easy to
-    lose in a later edit, so this test pins it: the handlers registered with
-    the operating system must be exactly the same before, during and after.
-    """
-    before = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-
-    with _QuietServer(_config()).capture_signals():
-        during = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-
-    after = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-
-    assert during == before
-    assert after == before
-
-
-def test_stock_uvicorn_still_installs_its_own_handlers() -> None:
-    """The behaviour _QuietServer exists to suppress is still uvicorn's.
-
-    Without this, the test above would keep passing if a future uvicorn
-    release stopped capturing signals — and nobody would know that the
-    override, and the comments explaining why it is there, had become
-    obsolete.  So this asserts the opposite of the test above against the
-    unmodified class: inside capture_signals() the handler for each signal is
-    uvicorn's, and afterwards the original one is back.
-    """
-    before = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-    stock = uvicorn.Server(_config())
-
-    with stock.capture_signals():
-        during = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-
-    after = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-
-    assert during == {sig: stock.handle_exit for sig in _SHUTDOWN_SIGNALS}
-    assert after == before
-
-
-async def test_serve_starts_a_server_that_captures_no_signals(
+async def test_serve_uses_bounded_protocol_and_closes_clients(
     server: AudioServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AudioServer.serve() must start the quiet server, not a stock one.
-
-    The test above proves _QuietServer behaves; this one proves it is the class
-    actually used, which is the half a careless edit would undo.  uvicorn's own
-    `Server.serve` is replaced with a stand-in that records the server object
-    and returns immediately, so nothing binds a port and nothing runs forever;
-    then that recorded object's capture_signals() is exercised.  Reverting to
-    `uvicorn.Server(config)` would make the recorded object install uvicorn's
-    handlers here and fail the comparison.
-    """
     started: list[uvicorn.Server] = []
+    client = FakeSocket()
+    server._clients = {client}
 
-    async def _fake_serve(self: uvicorn.Server, sockets: Any = None) -> None:
+    async def fake_serve(self: uvicorn.Server, sockets: Any = None) -> None:
         started.append(self)
 
-    monkeypatch.setattr(uvicorn.Server, "serve", _fake_serve)
-
+    monkeypatch.setattr(uvicorn.Server, "serve", fake_serve)
     await server.serve()
+    assert isinstance(started[0], _QuietServer)
+    assert started[0].config.ws_max_size == 1024
+    assert started[0].config.ws_max_queue == 8
+    assert not started[0].config.access_log
+    assert not started[0].config.proxy_headers
+    assert client.closed and not server.has_clients
 
-    assert len(started) == 1
-    before = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-    with started[0].capture_signals():
-        during = {sig: signal.getsignal(sig) for sig in _SHUTDOWN_SIGNALS}
-    assert during == before
+
+async def test_serve_trusts_only_explicit_proxy_addresses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[uvicorn.Server] = []
+    server = AudioServer(
+        tmp_path, "127.0.0.1", 0, 0.1, trusted_proxies=("127.0.0.1", "10.1.0.0/24")
+    )
+
+    async def fake_serve(self: uvicorn.Server, sockets: Any = None) -> None:
+        started.append(self)
+
+    monkeypatch.setattr(uvicorn.Server, "serve", fake_serve)
+    await server.serve()
+    assert started[0].config.proxy_headers
+    assert started[0].config.forwarded_allow_ips == "127.0.0.1,10.1.0.0/24"

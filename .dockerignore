@@ -1,6 +1,11 @@
 # Never send secrets, local state, or build clutter to the Docker daemon.
 .git/
 .env
+.env.*
+.agents/
+.codex/
+.pytest_cache/
+tests/
 .venv/
 data/
 audio/
@@ -13,6 +18,9 @@ __pycache__/
 # Docs and repo metadata not needed inside the image
 README.md
 ARCHITECTURE.md
+SECURITY.md
+ROADMAP.md
+REVIEW.md
 logo.svg
 renovate.json
 docker-compose.yml

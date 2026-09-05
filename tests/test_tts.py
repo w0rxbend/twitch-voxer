@@ -20,6 +20,7 @@ tests that never synthesise a single word.
 import asyncio
 import logging
 import stat
+import time
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,40 @@ def shell_quote(text: str) -> str:
 
 
 class TestToMp3:
+    async def test_timeout_kills_converter_and_removes_partial_output(
+        self, tmp_path
+    ) -> None:
+        script = tmp_path / "slow-ffmpeg"
+        script.write_text("#!/bin/sh\nexec sleep 30\n")
+        script.chmod(0o700)
+        output = tmp_path / "out.mp3"
+        output.write_bytes(b"partial")
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(2):
+                await TTSService.to_mp3(
+                    tmp_path / "in.wav",
+                    output,
+                    ffmpeg_bin=str(script),
+                    timeout_secs=0.05,
+                )
+        assert not output.exists()
+
+    async def test_cancelled_converter_removes_partial_output(self, tmp_path) -> None:
+        script = tmp_path / "slow-ffmpeg"
+        script.write_text("#!/bin/sh\nexec sleep 30\n")
+        script.chmod(0o700)
+        output = tmp_path / "out.mp3"
+        output.write_bytes(b"partial")
+        pending = asyncio.create_task(
+            TTSService.to_mp3(tmp_path / "in.wav", output, ffmpeg_bin=str(script))
+        )
+        await asyncio.sleep(0.05)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(2):
+                await pending
+        assert not output.exists()
+
     async def test_success_does_not_raise(self, tmp_path: Path) -> None:
         """A converter that exits 0 is treated as success."""
         fake = make_fake_ffmpeg(tmp_path, exit_code=0, stderr="just the usual banner")
@@ -171,6 +206,43 @@ def write_voice_files(directory: Path, *names: str) -> None:
 
 
 class TestCustomVoiceLoading:
+    async def test_shared_engine_inference_and_style_load_are_serialized(
+        self, tmp_path
+    ) -> None:
+        class ConcurrentEngine:
+            active = 0
+            peak = 0
+            style_loads = 0
+
+            def get_voice_style(self, *, voice_name):
+                self.style_loads += 1
+                return "style"
+
+            def synthesize(self, text, **kwargs):
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+                time.sleep(0.01)
+                self.active -= 1
+                return b"wav", None
+
+            def save_audio(self, wav, path):
+                Path(path).write_bytes(wav)
+
+        engine = ConcurrentEngine()
+        service = TTSService(engine=engine)
+        paths = await asyncio.gather(
+            *(
+                asyncio.to_thread(service.save_wav, "hello", voice_name="M1", lang="en")
+                for _ in range(8)
+            )
+        )
+        try:
+            assert engine.peak == 1
+            assert engine.style_loads == 1
+        finally:
+            for path in paths:
+                path.unlink(missing_ok=True)
+
     def test_voice_names_are_file_stems_after_the_builtins(
         self, tmp_path: Path
     ) -> None:

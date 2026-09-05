@@ -9,11 +9,26 @@ so they don't drown out the application's own output.
 """
 
 import logging
+import re
 import sys
 
 import colorlog
 
 from .config import LOG_LEVEL
+
+_CREDENTIAL_RE = re.compile(
+    r"(?i)(\b(?:bearer|oauth)\s*[: ]\s*|"
+    r"\b(?:access_token|refresh_token|client_secret|authorization|token)"
+    r"[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|oauth)\s+)?)([^\s\"'&,;}]+)"
+)
+
+
+class RedactingFormatter(colorlog.ColoredFormatter):
+    """Redact credentials after interpolation, including exception tracebacks."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        return _CREDENTIAL_RE.sub(lambda match: match.group(1) + "[REDACTED]", rendered)
 
 
 def setup_logging(level: str = LOG_LEVEL) -> None:
@@ -50,7 +65,7 @@ def setup_logging(level: str = LOG_LEVEL) -> None:
 
     # ColoredFormatter prepends ANSI colour codes based on log level.
     # %(name)-30s left-pads the logger name to 30 chars for column alignment.
-    fmt = colorlog.ColoredFormatter(
+    fmt = RedactingFormatter(
         "%(log_color)s%(asctime)s  %(levelname)-8s%(reset)s  "
         "%(cyan)s%(name)-30s%(reset)s %(message)s",
         datefmt="%H:%M:%S",

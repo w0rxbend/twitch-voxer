@@ -1,0 +1,21 @@
+/* Shared presentation and accessibility for both OBS overlays. */
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+
+#np-card .np-username { min-width: 0; }
+#np-card .np-emotes { min-width: 0; flex-shrink: 1; }
+#np-card .np-emotes img { flex: 0 0 24px; }
+
+#autoplay-hint {
+  width: 100%; height: 100%;
+  border: 0; border-radius: 0;
+  font-family: inherit;
+  touch-action: manipulation;
+}
+#autoplay-hint:hover { background: rgba(5, 8, 12, .72); }
+#autoplay-hint:focus-visible { outline: 3px solid #55e6ff; outline-offset: -8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  #visualizer, #emote-layer, .fp { display: none; }
+  #np-card.visible, #np-card.leaving { animation: none; }
+}

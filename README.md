@@ -30,6 +30,18 @@ docker compose up --build
 
 The server starts on `http://localhost:8080`. Add that URL as an OBS browser source — TTS audio plays there automatically.
 
+Local runs now bind to `127.0.0.1` by default. Docker and other network
+listeners require `VOXER_OVERLAY_TOKEN`. Generate a separate secret with
+`python3 -c "import secrets; print(secrets.token_urlsafe(32))"` and put the
+result in `.env`. Use `http://localhost:8080/?token=YOUR_TOKEN` or
+`http://localhost:8080/simple?token=YOUR_TOKEN` as the OBS source URL. The
+server exchanges the token for an HttpOnly cookie and redirects without the
+query token. Keep the token in the configured OBS URL for fresh browser profiles.
+
+Docker publishes both ports on localhost only. See [Security and deployment](SECURITY.md)
+for allowed hosts and TLS reverse proxies. See [Feature roadmap](ROADMAP.md)
+for proposed next features. Never use a Twitch token as the overlay credential.
+
 > First run downloads the Supertonic TTS model and may take a minute.
 
 See [Getting Twitch Credentials](#getting-twitch-credentials) if you haven't created a Twitch application yet.
@@ -39,17 +51,19 @@ See [Getting Twitch Credentials](#getting-twitch-credentials) if you haven't cre
 ## Features
 
 - **TTS for every chatter** — powered by [Supertonic](https://github.com/supertonic-ai/supertonic); ten built-in voices (M1–M5, F1–F5) plus optional custom voices from the `voices/` directory.
-- **Persistent voice assignment** — each Twitch username keeps the same randomly-assigned voice across sessions (stored in a local JSON file via pickledb).
+- **Persistent voice assignment** — each Twitch username keeps the same randomly-assigned voice across sessions (stored in an atomically written local JSON file).
 - **Language detection** — automatically detects Ukrainian (`uk`) and English (`en`); defaults to Ukrainian. Announcements are phrased in the detected language.
 - **Message normalisation**
   - URLs are replaced with a spoken phrase (*"see link in the chat"* / *"дивіться посилання в чаті"*).
   - Common abbreviations are expanded (`wtf` → *"what the f"*, `asap` → *"as soon as possible"*, `гг` → *"гарна гра"*, `хз` → *"хто зна"*, and many more — language-aware).
   - Laugh expressions (`lol`, `kek`, `хаха`, `азаз`, …) are converted to the TTS `<laugh>` expression tag.
 - **Bot filtering** — well-known bot accounts (StreamElements, Nightbot, Moobot, …) and any username containing "bot" are silently skipped.
-- **WebSocket audio streaming** — the synthesised MP3 is served over HTTP and pushed to connected browser clients via WebSocket. Audio files are deleted server-side as soon as the client confirms playback is complete.
+- **WebSocket audio streaming** — MP3 clips are delivered to authenticated overlays. Each recipient owns its playback acknowledgement; files remain until all recipients finish, disconnect, or expire.
 - **OBS browser source** — the built-in transparent page auto-connects, queues audio, and plays it sequentially with exponential-backoff reconnection (no user interaction required; OBS CEF bypasses autoplay restrictions).
 - **Scheduled messages** — posts random weighted messages to chat. Messages and per-hour frequencies are read from `data/messages.json` at runtime — no restart needed to add or remove entries.
 - **Colourful logging** — structured, colour-coded terminal output via `colorlog`.
+- **Bounded processing** — per-user cooldowns, stale-message expiry, text limits, bounded playback queues, and offline synthesis suppression control overload.
+- **Local overlay assets** — pinned graphics libraries are bundled with their licenses; playback does not execute JavaScript from third-party CDNs.
 
 ---
 
@@ -176,7 +190,7 @@ Create `data/messages.json` with the messages the scheduler will randomly post:
 uv run main.py
 ```
 
-The server starts on `http://0.0.0.0:8080`. Open `http://localhost:8080` in a browser (or add it as an OBS browser source) to receive TTS audio.
+The server binds to `127.0.0.1:8080`. Open `http://localhost:8080` in a browser (or add it as an OBS browser source) to receive TTS audio. Include an overlay token when configured, as described above.
 
 The first run downloads the Supertonic TTS model — this may take a minute.
 
@@ -325,10 +339,14 @@ this in either direction (see the table above).
 
 Regular browsers (unlike OBS) block audio until you interact with the page —
 this is the browser's autoplay policy, a protection against sites that play
-sound uninvited. When that happens the overlay shows a **"Click anywhere to
-enable audio"** message; click (or press any key) once and playback starts,
-including the message that was blocked. Nothing is lost: blocked audio stays
-at the front of the queue until you interact.
+sound uninvited. When that happens the overlay focuses an **Enable Audio**
+button. Click it or press Enter/Space to retry playback. Pending audio remains
+subject to the queue capacity and age limits while it waits for interaction.
+
+Both pages honor the operating system's reduced-motion preference: speech and
+the now-playing card remain available while decorative animation stops. Changes
+to that preference take effect during playback. Returning through browser
+Back/Forward reconnects the overlay with fresh playback ownership.
 
 ---
 
@@ -347,20 +365,20 @@ Every setting is read from the environment (or from a `.env` file in the working
 | `VOXER_OAUTH_PORT` | `4343` | Port of the OAuth authorization server — must match the redirect URL registered in the Twitch dev console |
 | `VOXER_OAUTH_REDIRECT_URL` | `http://localhost:4343/oauth/callback` | The full OAuth Redirect URL — must match exactly what is registered in the Twitch dev console; set an `https://` URL for reverse-proxy setups (non-localhost hosts must be `https://`; validated at startup) |
 | `VOXER_TOKEN_FILE` | `data/tokens.json` | Where obtained OAuth tokens are persisted and auto-refreshed |
-| `VOXER_DB_PATH` | `data/voices.json` | Path to the pickledb file storing username → voice mappings |
-| `VOXER_TIMESTAMPS_DB_PATH` | `data/timestamps.json` | Path to the pickledb file storing when each chatter last spoke — the record the announce window below is measured against |
+| `VOXER_DB_PATH` | `data/voices.json` | Path to the JSON file storing username → voice mappings |
+| `VOXER_TIMESTAMPS_DB_PATH` | `data/timestamps.json` | Path to the JSON file storing when each chatter last spoke — the record the announce window below is measured against |
 | `VOXER_MESSAGES_PATH` | `data/messages.json` | Path to the scheduled messages file |
-| `VOXER_EMOTES_DB_PATH` | `emotes/emotes.db` | Path to the pickledb file of emote name → image URLs. Written by `uv run voxer-fetch-emotes` and read once at startup; if you change this, the fetcher and the bot both follow it |
+| `VOXER_EMOTES_DB_PATH` | `emotes/emotes.db` | Path to the JSON file of emote name → image URLs. Written by `uv run voxer-fetch-emotes` and read once at startup; if you change this, the fetcher and the bot both follow it |
 | `VOXER_VOICES_DIR` | `voices` | Directory scanned for custom voice `*.json` files. Each file's name (without the extension) becomes a voice on top of the ten built-in ones; a directory that does not exist is reported in the log rather than ignored |
 | `VOXER_AUDIO_DIR` | `audio` | Directory where MP3 files are temporarily stored |
-| `VOXER_SERVER_HOST` | `0.0.0.0` | Host the HTTP/WebSocket server binds to |
+| `VOXER_SERVER_HOST` | `127.0.0.1` | Bind address; a non-loopback listener requires an overlay token |
 | `VOXER_SERVER_PORT` | `8080` | Port the server listens on |
 | `VOXER_WS_SEND_TIMEOUT` | `5` | Seconds one overlay client may take to accept a WebSocket message before the server drops it. A paused OBS source or a sleeping laptop keeps its connection open but stops reading it, which would otherwise stall every message behind it |
 | `VOXER_AUDIO_SWEEP_INTERVAL_SECS` | `300` | How often a background task looks for abandoned MP3 files in `VOXER_AUDIO_DIR`. A clip is normally deleted as soon as the overlay reports it finished playing; a browser that crashes or is refreshed mid-clip never sends that report |
-| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | How old an MP3 must be before that sweep deletes it. A clip the overlay has been sent but has not reported as played is never swept whatever its age, so this only ever applies to files nobody is waiting for. Do not lower it: a younger file may still be queued for synthesis or on its way to the browser |
+| `VOXER_AUDIO_MAX_AGE_SECS` | `300` | Hard lifetime of outstanding playback receipts, checked during broadcasts and sweeps. Also sets the age threshold for orphaned MP3 cleanup. Allow enough time for queued playback. |
 | `VOXER_SCHEDULER_EMPTY_RETRY_DELAY` | `600` | Delay before re-checking when the scheduled-message list is empty (`VOXER_SCHEDULER_INTERVAL` is a deprecated alias) |
 | `VOXER_SCHEDULER_INITIAL_DELAY` | `10` | Seconds to wait before the first scheduled message |
-| `VOXER_MESSAGE_QUEUE_MAXSIZE` | `20` | How many messages may wait for speech synthesis at once. Synthesis takes seconds per message, so this bound keeps the overlay from falling minutes behind a busy chat: once the queue is full, new chat messages are dropped (and logged), while channel events wait for room. |
+| `VOXER_MESSAGE_QUEUE_MAXSIZE` | `20` | How many messages may wait for speech synthesis. New chat messages and channel events are dropped when the queue is full. |
 | `VOXER_ANNOUNCE_WINDOW_SECS` | `300` | Seconds of silence from a chatter before their name is spoken again as a "username says:" prefix. Within the window their messages are read out on their own |
 | `VOXER_NO_ANNOUNCE_USERS` | the value of `TWITCH_BOT_USERNAME` | Comma-separated logins that never get the "username says:" prefix (case-insensitive). Setting it **replaces** the default rather than adding to it, so include the bot's own login if you set it |
 | `VOXER_EMOTE_SOUND_PATHS` | `emotes/slack-message.mp3,emotes/discord.mp3` | Comma-separated MP3 files, one picked at random, played for a message that has no speakable text (only emotes or emoji). An empty list means such messages are skipped |
@@ -420,7 +438,10 @@ twitch-voxer/
 │   └── static/
 │       ├── index.html       # Full OBS overlay (3D speaker + effects)
 │       ├── simple.html      # Lightweight overlay
-│       └── overlay.js       # Shared overlay runtime (queueing, WebSocket, playback)
+│       ├── overlay.js       # Shared overlay runtime (queueing, WebSocket, playback)
+│       ├── overlay.css      # Shared layout and accessibility
+│       ├── full.js          # Full overlay visual adapter
+│       └── simple.js        # Lightweight visual adapter
 ├── tests/                   # Unit tests (config, text rules, stores, handler, bot, tts, server, ...)
 ├── data/
 │   └── messages.json        # Scheduled messages (pickledb format)
@@ -438,6 +459,18 @@ Run the unit test suite (configuration parsing, text normalisation, the persiste
 ```bash
 uv run pytest
 ```
+
+Run the browser smoke test with optional Playwright tooling and local ffmpeg:
+
+```bash
+uv run --frozen --with playwright python -m playwright install chromium
+uv run --frozen --with playwright python tests/browser_overlay.py
+```
+
+It starts an isolated local AudioServer, generates a silent MP3, and checks both
+overlays with normal and reduced motion, keyboard autoplay recovery, a narrow
+viewport, playback acknowledgements and browser errors. Screenshots are written
+to the printed temporary directory. It does not load Twitch grants or the TTS model.
 
 ---
 

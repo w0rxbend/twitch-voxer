@@ -7,13 +7,14 @@ restarting the bot.
 
 import asyncio
 import logging
+import math
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-import pickledb
+from .stores import read_json_object
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 SECONDS_PER_HOUR = 3600.0
@@ -23,6 +24,8 @@ DEFAULT_FREQUENCY_PER_HOUR = 1.0
 # message went out, not to reproduce it, so it is truncated to keep one cycle
 # on one line.
 LOG_TEXT_PREVIEW_CHARS: Final[int] = 60
+MIN_POST_DELAY_SECS = 30.0
+MAX_MESSAGES = 1000
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,11 @@ class Scheduler:
                            Gives the EventSub connection time to establish before posting.
         """
         self._send_chat = send_chat
-        self._db = pickledb.PickleDB(str(messages_path))
+        self._messages_path = messages_path
+        if not math.isfinite(empty_retry_delay) or empty_retry_delay <= 0:
+            raise ValueError("Scheduler retry delay must be finite and positive")
+        if not math.isfinite(initial_delay) or initial_delay < 0:
+            raise ValueError("Scheduler initial delay must be finite and nonnegative")
         self._empty_retry_delay = empty_retry_delay
         self._initial_delay = initial_delay
         # Counts attempts, not successes: it is incremented before the send and
@@ -67,7 +74,7 @@ class Scheduler:
 
     def _parse_message(self, raw: Any, index: int) -> ScheduledMessage | None:
         if isinstance(raw, str):
-            return ScheduledMessage(raw, DEFAULT_FREQUENCY_PER_HOUR)
+            raw = {"text": raw}
 
         if not isinstance(raw, dict):
             LOGGER.warning(
@@ -76,14 +83,14 @@ class Scheduler:
             return None
 
         text = raw.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str) or not text.strip() or len(text) > 500:
             LOGGER.warning("Skipping scheduled message %d: missing text", index)
             return None
 
         frequency = raw.get("frequency_per_hour", DEFAULT_FREQUENCY_PER_HOUR)
         try:
             frequency_per_hour = float(frequency)
-        except TypeError, ValueError:
+        except TypeError, ValueError, OverflowError:
             LOGGER.warning(
                 "Skipping scheduled message %d: invalid frequency_per_hour=%r",
                 index,
@@ -91,9 +98,20 @@ class Scheduler:
             )
             return None
 
-        if frequency_per_hour <= 0:
+        if (
+            isinstance(frequency, bool)
+            or not math.isfinite(frequency_per_hour)
+            or frequency_per_hour <= 0
+        ):
             LOGGER.warning(
                 "Skipping scheduled message %d: frequency_per_hour must be positive",
+                index,
+            )
+            return None
+
+        if not math.isfinite(SECONDS_PER_HOUR / frequency_per_hour):
+            LOGGER.warning(
+                "Skipping scheduled message %d: frequency_per_hour yields an infinite interval",
                 index,
             )
             return None
@@ -108,8 +126,8 @@ class Scheduler:
         Returns an empty list (and logs a warning) if loading fails.
         """
         try:
-            await self._db.load()
-            messages = await self._db.get("messages")
+            values = await asyncio.to_thread(read_json_object, self._messages_path)
+            messages = values.get("messages")
             if not messages:
                 LOGGER.warning("No messages found in DB")
                 return []
@@ -118,7 +136,7 @@ class Scheduler:
                 return []
             parsed = [
                 message
-                for index, raw in enumerate(messages, start=1)
+                for index, raw in enumerate(messages[:MAX_MESSAGES], start=1)
                 if (message := self._parse_message(raw, index)) is not None
             ]
             if not parsed:
@@ -135,6 +153,8 @@ class Scheduler:
 
     def _choose_message(self, messages: list[ScheduledMessage]) -> ScheduledMessage:
         weights = [message.frequency_per_hour for message in messages]
+        largest = max(weights)
+        weights = [weight / largest for weight in weights]
         return random.choices(messages, weights=weights, k=1)[0]
 
     def _delay_for(self, messages: list[ScheduledMessage]) -> float:
@@ -143,7 +163,10 @@ class Scheduler:
         )
         if total_frequency_per_hour <= 0:
             return float(self._empty_retry_delay)
-        return SECONDS_PER_HOUR / total_frequency_per_hour
+        delay = SECONDS_PER_HOUR / total_frequency_per_hour
+        if not math.isfinite(delay):
+            return float(self._empty_retry_delay)
+        return max(MIN_POST_DELAY_SECS, delay)
 
     async def _run_once(self) -> float:
         """Run exactly one scheduling cycle and report how long to wait after it.
@@ -177,7 +200,8 @@ class Scheduler:
             message.text[:LOG_TEXT_PREVIEW_CHARS],
         )
         try:
-            await self._send_chat(message.text)
+            async with asyncio.timeout(30):
+                await self._send_chat(message.text)
         except Exception:
             # A transient Twitch API failure (network blip, token refresh,
             # 500) must not kill the scheduler — and, via the TaskGroup

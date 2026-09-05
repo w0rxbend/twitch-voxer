@@ -71,7 +71,7 @@ USER voxer
 EXPOSE 8080 4343
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-    CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/')"]
+    CMD ["/app/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=3)"]
 
 # Run the venv's python directly as PID 1 (no uv wrapper in the runtime image).
 CMD ["python", "main.py"]

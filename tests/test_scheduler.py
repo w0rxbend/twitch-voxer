@@ -75,6 +75,38 @@ class Recorder:
 
 
 class TestParseMessage:
+    def test_rate_with_infinite_interval_is_rejected(self, tmp_path) -> None:
+        scheduler = make_scheduler(tmp_path)
+        assert (
+            scheduler._parse_message({"text": "hello", "frequency_per_hour": 5e-324}, 1)
+            is None
+        )
+
+    def test_very_low_finite_rate_is_preserved(self, tmp_path) -> None:
+        scheduler = make_scheduler(tmp_path)
+        message = scheduler._parse_message(
+            {"text": "hello", "frequency_per_hour": 1e-100}, 1
+        )
+        assert message == ScheduledMessage("hello", 1e-100)
+        assert scheduler._delay_for([message]) == 3600 / 1e-100
+
+    @pytest.mark.parametrize(
+        "frequency", [float("nan"), float("inf"), "NaN", "Infinity", True, 10**1000]
+    )
+    def test_nonfinite_or_boolean_frequency_is_rejected(
+        self, tmp_path, frequency
+    ) -> None:
+        assert (
+            make_scheduler(tmp_path)._parse_message(
+                {"text": "hello", "frequency_per_hour": frequency}, 1
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize("text", ["", "   ", "x" * 501])
+    def test_invalid_plain_strings_are_rejected(self, tmp_path, text) -> None:
+        assert make_scheduler(tmp_path)._parse_message(text, 1) is None
+
     def test_plain_string(self, tmp_path: Path) -> None:
         msg = make_scheduler(tmp_path)._parse_message("hello", 1)
         assert msg == ScheduledMessage("hello", DEFAULT_FREQUENCY_PER_HOUR)
@@ -106,6 +138,18 @@ class TestParseMessage:
 
 
 class TestDelayFor:
+    def test_unrepresentable_delay_uses_finite_fallback(self, tmp_path) -> None:
+        assert (
+            make_scheduler(tmp_path)._delay_for([ScheduledMessage("bad", 5e-324)])
+            == 600.0
+        )
+
+    def test_extreme_total_frequency_has_a_safe_minimum_delay(self, tmp_path) -> None:
+        messages = [ScheduledMessage("a", 1e308), ScheduledMessage("b", 1e308)]
+        scheduler = make_scheduler(tmp_path)
+        assert scheduler._delay_for(messages) == 30.0
+        assert scheduler._choose_message(messages) in messages
+
     def test_delay_is_hour_over_total_frequency(self, tmp_path: Path) -> None:
         messages = [ScheduledMessage("a", 1.0), ScheduledMessage("b", 3.0)]
         # 4 messages/hour in total → one every 900 seconds

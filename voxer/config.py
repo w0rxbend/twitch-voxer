@@ -15,6 +15,8 @@ function points backwards.
 """
 
 import os
+import re
+from ipaddress import ip_address, ip_network
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -155,8 +157,16 @@ MESSAGES_PATH: str = os.getenv("VOXER_MESSAGES_PATH", "data/messages.json")
 VOICES_DIR: str = os.getenv("VOXER_VOICES_DIR", "voices")
 
 # ── HTTP / WebSocket server ───────────────────────────────────────────────────
-SERVER_HOST: str = os.getenv("VOXER_SERVER_HOST", "0.0.0.0")
+SERVER_HOST: str = os.getenv("VOXER_SERVER_HOST", "127.0.0.1").strip()
 SERVER_PORT: int = _env_int("VOXER_SERVER_PORT", "8080", maximum=65535)
+# Network listeners require a separate overlay credential, never a Twitch token.
+OVERLAY_TOKEN: str = os.getenv("VOXER_OVERLAY_TOKEN", "")
+ALLOWED_HOSTS: tuple[str, ...] = tuple(_env_csv("VOXER_ALLOWED_HOSTS", ""))
+TRUSTED_PROXIES: tuple[str, ...] = tuple(_env_csv("VOXER_TRUSTED_PROXIES", ""))
+MAX_WS_CLIENTS: int = _env_int("VOXER_MAX_WS_CLIENTS", "8", maximum=256)
+MAX_PENDING_PER_CLIENT: int = _env_int(
+    "VOXER_MAX_PENDING_PER_CLIENT", "64", maximum=1024
+)
 # How many seconds one overlay client may take to accept a WebSocket message
 # before the server gives up on it and drops the connection.  Broadcasts are
 # sent to clients one after another from the same task that drains the message
@@ -235,6 +245,10 @@ SCHEDULER_EMPTY_RETRY_DELAY: int = _env_int(
 # as unbounded, which would turn the paragraph above into a comment describing
 # something the code no longer does.
 MESSAGE_QUEUE_MAXSIZE: int = _env_int("VOXER_MESSAGE_QUEUE_MAXSIZE", "20")
+MAX_MESSAGE_CHARS: int = _env_int("VOXER_MAX_MESSAGE_CHARS", "500", maximum=500)
+MAX_SPEECH_CHARS: int = _env_int("VOXER_MAX_SPEECH_CHARS", "1000", maximum=2000)
+MAX_MESSAGE_AGE_SECS: int = _env_int("VOXER_MAX_MESSAGE_AGE_SECS", "60")
+USER_COOLDOWN_SECS: int = _env_int("VOXER_USER_COOLDOWN_SECS", "2", minimum=0)
 
 # ── Announcement behaviour ────────────────────────────────────────────────────
 # Time window (seconds) during which a user's name is NOT re-announced.
@@ -280,7 +294,7 @@ def parse_redirect_url(url: str) -> tuple[str | None, str]:
     path = parsed.path.strip("/") or "oauth/callback"
     if host in ("", "localhost", "127.0.0.1"):
         return None, path
-    return host, path
+    return parsed.netloc, path
 
 
 def validate_redirect_url(url: str) -> None:
@@ -294,10 +308,21 @@ def validate_redirect_url(url: str) -> None:
         code-exchange redirect URI with https for any public domain, so both
         URIs would mismatch byte-for-byte otherwise.
     """
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        # Accessing .port also validates malformed and out-of-range ports.
+        parsed.port
+    except ValueError:
+        raise ConfigError(
+            "VOXER_OAUTH_REDIRECT_URL has an invalid host or port"
+        ) from None
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         raise ConfigError(
             f"VOXER_OAUTH_REDIRECT_URL must be a full http(s) URL, got: {url!r}"
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ConfigError(
+            "VOXER_OAUTH_REDIRECT_URL cannot contain credentials, a query or a fragment"
         )
     is_localhost = parsed.hostname in ("localhost", "127.0.0.1")
     if not is_localhost and parsed.scheme != "https":
@@ -328,11 +353,44 @@ def validate_credentials() -> None:
     the bot account, so enforcing the bot's settings there would reject a
     setup that works perfectly well.
     """
-    missing = [name for name, value in _REQUIRED_CREDENTIALS if not value]
+    missing = [name for name, value in _REQUIRED_CREDENTIALS if not value.strip()]
     if missing:
         raise ConfigError(
             "Required environment variables are not set: " + ", ".join(missing)
         )
+
+
+def validate_overlay_access(host: str, token: str) -> None:
+    """Require an independent, URL-safe credential for a network listener."""
+    if not host:
+        raise ConfigError("VOXER_SERVER_HOST must not be empty")
+    try:
+        is_loopback = ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host.lower() == "localhost"
+    if token and not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+        raise ConfigError(
+            "VOXER_OVERLAY_TOKEN must be 32-256 URL-safe characters; "
+            "generate it with secrets.token_urlsafe(32)"
+        )
+    if not is_loopback and not token:
+        raise ConfigError(
+            "VOXER_OVERLAY_TOKEN is required when VOXER_SERVER_HOST "
+            "listens beyond localhost"
+        )
+
+
+def validate_trusted_proxies(addresses: tuple[str, ...]) -> None:
+    """Forwarded headers are opt-in and limited to explicit proxy addresses."""
+    for address in addresses:
+        try:
+            network = ip_network(address, strict=False)
+        except ValueError:
+            raise ConfigError(
+                "VOXER_TRUSTED_PROXIES must contain IP addresses or CIDR networks"
+            ) from None
+        if network.prefixlen == 0:
+            raise ConfigError("VOXER_TRUSTED_PROXIES cannot trust every address")
 
 
 def validate_config() -> None:
@@ -354,3 +412,17 @@ def validate_config() -> None:
             "account ID and used as the bot's identity for the whole run."
         )
     validate_redirect_url(OAUTH_REDIRECT_URL)
+    redirect = urlparse(OAUTH_REDIRECT_URL)
+    if (
+        redirect.scheme == "http"
+        and redirect.hostname in ("localhost", "127.0.0.1")
+        and (redirect.port or 80) != OAUTH_PORT
+    ):
+        raise ConfigError(
+            "VOXER_OAUTH_REDIRECT_URL port must match VOXER_OAUTH_PORT "
+            "for the local authorization server"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,25}", BOT_USERNAME):
+        raise ConfigError("TWITCH_BOT_USERNAME must be a Twitch login name")
+    validate_overlay_access(SERVER_HOST, OVERLAY_TOKEN)
+    validate_trusted_proxies(TRUSTED_PROXIES)

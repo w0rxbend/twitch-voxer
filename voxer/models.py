@@ -13,7 +13,10 @@ resolvable (server.py) cannot drift apart unnoticed.
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+import re
+import time
 from typing import Final
+from typing import TypeGuard
 
 
 @dataclass
@@ -30,6 +33,12 @@ class EmoteItem:
 # overlay: the browser would request a path nothing answers, and neither a
 # test nor a type check would notice, because a URL is only ever a string.
 AUDIO_URL_PREFIX: Final[str] = "/audio"
+_AUDIO_NAME = re.compile(r"[A-Za-z0-9_-]{1,128}\.mp3")
+
+
+def is_audio_filename(filename: object) -> TypeGuard[str]:
+    """Recognize the MP3 basename contract shared by producers and delivery."""
+    return isinstance(filename, str) and _AUDIO_NAME.fullmatch(filename) is not None
 
 
 def audio_url_for(filename: str) -> str:
@@ -39,6 +48,8 @@ def audio_url_for(filename: str) -> str:
     result is a relative URL such as "/audio/6c8e….mp3", which the browser
     resolves against whatever host it loaded the overlay page from.
     """
+    if not is_audio_filename(filename):
+        raise ValueError("Audio filename must be a bare MP3 filename")
     return f"{AUDIO_URL_PREFIX}/{filename}"
 
 
@@ -73,3 +84,6 @@ class QueuedMessage:
         default_factory=list
     )  # Twitch emote names from message fragments
     avatar_url: str | None = None
+    enqueued_at: float = field(
+        default_factory=time.monotonic, compare=False, repr=False
+    )

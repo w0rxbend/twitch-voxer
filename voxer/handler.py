@@ -38,8 +38,11 @@ import asyncio
 import logging
 import random
 import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 from langdetect import detect, LangDetectException
@@ -52,7 +55,9 @@ from .textnorm import (
     extract_emojis,
     is_bot,
     normalize,
+    limit_speech,
     rules_for,
+    sanitize_text,
 )
 from .tts import TTSService
 
@@ -88,6 +93,10 @@ class MessageHandler:
         message_queue: asyncio.Queue["QueuedMessage"],
         emote_sound_paths: list[str] | None = None,
         no_announce_users: frozenset[str] | None = None,
+        max_text_chars: int = 500,
+        max_speech_chars: int = 1000,
+        max_message_age_secs: float = 60.0,
+        overlay_available: Callable[[], bool] | None = None,
     ) -> None:
         """Initialize the message handler.
 
@@ -112,10 +121,18 @@ class MessageHandler:
         self._audio_dir = audio_dir
         self._broadcast = broadcast
         self._message_queue = message_queue
+        self._max_text_chars = max_text_chars
+        self._max_speech_chars = max_speech_chars
+        self._max_message_age_secs = max_message_age_secs
+        self._overlay_available = overlay_available
+        self._synthesis_lock = asyncio.Lock()
+        self._language_lock = asyncio.Lock()
 
         # Filter out configured sound paths that don't exist on disk at startup
         self._emote_sounds: list[Path] = [
-            p for raw in (emote_sound_paths or []) if (p := Path(raw)).exists()
+            p
+            for raw in (emote_sound_paths or [])
+            if (p := Path(raw)).is_file() and p.suffix.lower() == ".mp3"
         ]
         # Lower-cased here, at the boundary, because the comparison further down
         # lower-cases the incoming username and would otherwise never match a
@@ -137,7 +154,8 @@ class MessageHandler:
         falls back to "uk" (the primary stream language).
         """
         try:
-            lang = await asyncio.to_thread(detect, text)
+            async with self._language_lock:
+                lang = await asyncio.to_thread(detect, text)
             resolved = lang if lang in SUPPORTED_LANGS else DEFAULT_LANG
             LOGGER.debug("Detected lang: %s -> %s", lang, resolved)
             return resolved
@@ -158,7 +176,30 @@ class MessageHandler:
             for name in emote_names
             if (url := self._emote_store.lookup(name)) is not None
         ]
-        return resolved + emoji_items
+        return (resolved + emoji_items)[:32]
+
+    @staticmethod
+    async def _file_job(function, *args, cleanup_path: Path | None = None, **kwargs):
+        """Dispose of thread output after cancellation, when writing is finished."""
+        worker = asyncio.get_running_loop().run_in_executor(
+            None, partial(function, *args, **kwargs)
+        )
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+
+            def discard_result(completed: asyncio.Future) -> None:
+                try:
+                    result = completed.result()
+                except BaseException:
+                    if cleanup_path is not None:
+                        cleanup_path.unlink(missing_ok=True)
+                else:
+                    path = cleanup_path if cleanup_path is not None else Path(result)
+                    path.unlink(missing_ok=True)
+
+            worker.add_done_callback(discard_result)
+            raise
 
     def _new_mp3_path(self) -> Path:
         """Return a fresh, unused path for one clip inside audio_dir.
@@ -240,9 +281,13 @@ class MessageHandler:
              broadcast fails, deletes it again.
         """
         # Synthesis is synchronous and CPU-bound; run it off the event loop
-        wav_path = await asyncio.to_thread(
-            self._tts.save_wav, final_text, voice_name=voice, lang=lang
-        )
+        async with self._synthesis_lock:
+            wav_path = await self._file_job(
+                self._tts.save_wav,
+                limit_speech(final_text, self._max_speech_chars),
+                voice_name=voice,
+                lang=lang,
+            )
         mp3_path = self._new_mp3_path()
         try:
             await self._tts.to_mp3(wav_path, mp3_path)
@@ -253,7 +298,7 @@ class MessageHandler:
             raise
         finally:
             # Always clean up the temporary WAV even if ffmpeg fails
-            wav_path.unlink()
+            wav_path.unlink(missing_ok=True)
 
         await self._publish(
             mp3_path, username=username, avatar_url=avatar_url, emotes=emotes
@@ -317,7 +362,9 @@ class MessageHandler:
         # possibly while the browser was still playing it.  copyfile leaves the
         # new file stamped "now", which is what the clip's age actually is.
         try:
-            await asyncio.to_thread(shutil.copyfile, sound, mp3_path)
+            await self._file_job(
+                shutil.copyfile, sound, mp3_path, cleanup_path=mp3_path
+            )
         except BaseException:
             # The copy can fail part-way (a full disk, a cancelled task) and
             # leave a truncated file behind, exactly as a failed ffmpeg run can
@@ -353,7 +400,9 @@ class MessageHandler:
 
         lang = await self._detect_lang(clean_text)
         voice = await self._voice_store.get_or_assign(message.username)
-        normalized = normalize(clean_text, lang)
+        normalized = normalize(clean_text, lang, max_chars=self._max_speech_chars)
+        if not normalized.strip():
+            return
 
         # The timestamp is always recorded; the prefix is applied only when the
         # announce window elapsed AND the user is not on the no-announce list.
@@ -387,7 +436,20 @@ class MessageHandler:
         Args:
             message: The queued message to process.
         """
+        if time.monotonic() - message.enqueued_at > self._max_message_age_secs:
+            LOGGER.debug("Skipping stale queued message")
+            return
+        if self._overlay_available is not None and not self._overlay_available():
+            return
+        message = replace(
+            message,
+            username=sanitize_text(message.username, 100),
+            text=sanitize_text(message.text, self._max_text_chars),
+            emote_names=message.emote_names[:32],
+        )
         if message.kind is MessageKind.SYSTEM:
+            if not message.text:
+                return
             await self._handle_system(message)
         else:
             await self._handle_user(message)

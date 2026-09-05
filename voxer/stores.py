@@ -1,206 +1,288 @@
-"""Small persistence wrappers around pickledb files.
+"""Bounded JSON stores with atomic writes outside the event loop.
 
-Each store owns exactly one pickledb file.  The read-write stores (VoiceStore,
-AnnounceTracker) also own an asyncio.Lock, which keeps their check-then-update
-sequences atomic by construction; EmoteStore is read-only after load and needs
-none.  Extracted from MessageHandler so the handler holds behaviour, not
-storage plumbing, and so each store can be constructed and tested on its own.
+Files retain the original pickledb JSON shape. Voice assignments are durable
+on creation; disposable announcement timestamps are checkpointed periodically.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
+import math
+import os
 import random
+import tempfile
 import time
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
-import pickledb
+LOGGER = logging.getLogger(__name__)
+MAX_STORE_BYTES = 16 * 1024 * 1024
+MAX_VOICE_USERS = 50_000
+MAX_ANNOUNCE_USERS = 10_000
+MAX_EMOTES = 50_000
+VOICE_RETRY_INTERVAL_SECS = 5.0
 
-LOGGER: logging.Logger = logging.getLogger(__name__)
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    """Read a size-limited JSON object; callers decide how to handle failures."""
+    with path.open("rb") as source:
+        data = source.read(MAX_STORE_BYTES + 1)
+    if len(data) > MAX_STORE_BYTES:
+        raise ValueError(f"JSON store exceeds {MAX_STORE_BYTES} bytes")
+    value = json.loads(data)
+    if not isinstance(value, dict):
+        raise ValueError("JSON store must contain an object")
+    return value
 
 
-async def _load_or_start_empty(db: pickledb.PickleDB, label: str) -> None:
-    """Load a pickledb file, tolerating a missing or corrupt file.
-
-    A broken DB file must not abort startup — the store simply starts empty
-    and the next save() rewrites the file cleanly.
-    """
+def _write_json(path: Path, values: dict[str, Any]) -> None:
+    """Replace a complete file atomically, with restrictive file permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
     try:
-        await db.load()
-    except (FileNotFoundError, ValueError, OSError) as exc:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as target:
+            temporary = Path(target.name)
+            json.dump(values, target, ensure_ascii=True, allow_nan=False)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+async def _save(path: Path, values: dict[str, Any]) -> None:
+    # Keep the owner's lock until the writer finishes, even during shutdown;
+    # otherwise a cancelled write could later replace a newer checkpoint.
+    writer = asyncio.create_task(asyncio.to_thread(_write_json, path, dict(values)))
+    try:
+        await asyncio.shield(writer)
+    except asyncio.CancelledError:
+        while not writer.done():
+            try:
+                await asyncio.shield(writer)
+            except asyncio.CancelledError:
+                # Repeated cancellation must not release the store lock while
+                # the native writer can still replace a newer snapshot.
+                continue
+            except Exception:
+                break
+        try:
+            writer.result()
+        except Exception:
+            LOGGER.exception("JSON write failed during cancellation")
+        raise
+
+
+async def _load_or_start_empty(path: Path, label: str) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(read_json_object, path)
+    except (OSError, ValueError, UnicodeError) as exc:
         LOGGER.warning("Could not load %s DB, starting empty: %s", label, exc)
+        return {}
 
 
 class VoiceStore:
-    """Persistent username → voice-name assignments.
-
-    Assigns a random voice from the pool on a user's first message and keeps
-    that assignment across restarts.  The lock serialises concurrent reads and
-    writes to the same pickledb file, which is not async-safe on its own.
-    """
+    """Persistent, case-insensitive voice assignments with bounded growth."""
 
     def __init__(self, db_path: str, voices: list[str]) -> None:
-        """Create the store.
-
-        Args:
-            db_path: Path of the pickledb JSON file holding the assignments.
-            voices: Pool of valid voice names to assign from.
-        """
         if not voices:
             raise ValueError("VoiceStore needs a non-empty voice pool")
-        self._db = pickledb.PickleDB(db_path)
-        self._voices = list(voices)
+        self._path = Path(db_path)
+        self._voices = list(dict.fromkeys(voices))
+        self._voice_set = frozenset(self._voices)
+        self._assignments: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._dirty = False
+        self._retry_at = 0.0
 
-    def _random_voice(self) -> str:
-        """Pick a voice from the pool at random.
+    async def _flush_locked(self, *, force: bool = False) -> None:
+        if not self._dirty or (not force and time.monotonic() < self._retry_at):
+            return
+        try:
+            await _save(self._path, self._assignments)
+        except OSError:
+            self._retry_at = time.monotonic() + VOICE_RETRY_INTERVAL_SECS
+            LOGGER.exception("Could not persist voice assignments; will retry")
+        else:
+            self._dirty = False
+            self._retry_at = 0.0
 
-        Private because picking is only ever a step of assignment: the sole
-        caller is get_or_assign() below.  It used to be public so that
-        channel-event announcements could borrow it for their throwaway voice,
-        which made this store look like the place to ask "which voices exist?"
-        — a question it cannot answer, since the pool is handed to it by
-        whoever constructed it.  Those announcements now ask the TTS engine
-        directly, so the name says what is true again.
-        """
-        return random.choice(self._voices)
+    async def flush(self) -> None:
+        """Retry dirty assignments during orderly shutdown, bypassing backoff."""
+        async with self._lock:
+            await self._flush_locked(force=True)
 
     async def load(self) -> None:
-        """Load the DB file once at startup (missing/corrupt files start empty)."""
-        await _load_or_start_empty(self._db, "voice")
+        values = await _load_or_start_empty(self._path, "voice")
+        self._assignments = {
+            name.casefold(): voice
+            for name, voice in values.items()
+            if isinstance(name, str) and len(name) <= 100 and isinstance(voice, str)
+        }
 
     async def get_or_assign(self, username: str) -> str:
-        """Return the voice assigned to username, creating one if this is a new chatter.
-
-        A persisted voice that is no longer in the pool (e.g. a custom voice
-        whose JSON file was deleted or renamed) is replaced with a fresh
-        assignment — otherwise synthesis would crash on every future message
-        from that user.
-        """
+        username = username.casefold()
         async with self._lock:
-            voice = await self._db.get(username)
-            if voice not in self._voices:
-                if voice:
-                    LOGGER.warning(
-                        "Voice %r for %s no longer exists — reassigning",
-                        voice,
-                        username,
-                    )
-                voice = self._random_voice()
-                await self._db.set(username, voice)
-                LOGGER.info("New chatter %s — assigned voice %s", username, voice)
-                await self._db.save()
-            else:
-                LOGGER.debug("Voice for %s: %s", username, voice)
-        return voice
+            voice = self._assignments.get(username)
+            if voice in self._voice_set:
+                await self._flush_locked()
+                return voice
+            if (
+                username not in self._assignments
+                and len(self._assignments) >= MAX_VOICE_USERS
+            ):
+                # Preserve existing assignments when the store is full. New
+                # viewers get a repeatable voice without growing the file.
+                await self._flush_locked()
+                digest = hashlib.sha256(username.encode("utf-8")).digest()
+                return self._voices[
+                    int.from_bytes(digest[:8], "big") % len(self._voices)
+                ]
+            voice = random.choice(self._voices)
+            self._assignments[username] = voice
+            self._dirty = True
+            await self._flush_locked()
+            return voice
 
 
 class EmoteStore:
-    """Read-only Twitch emote name → image URL cache.
-
-    The underlying file is built by voxer/fetch_emotes.py and holds entries
-    like {"PogChamp": {"url_1x": ..., "url_2x": ..., "url_4x": ...}}.  It is
-    loaded once at startup and never written, so unlike the other stores it
-    needs no lock.  A missing or unreadable file leaves the cache empty, which
-    only means the overlay shows no images.
-    """
+    """Read-only, validated emote name to HTTPS image URL cache."""
 
     def __init__(self, db_path: str | None) -> None:
-        """Create the store.
-
-        Args:
-            db_path: Path of the emote cache file, or None to disable lookups
-                     entirely (the store then stays permanently empty).
-        """
-        self._db_path = db_path
-        self._emotes: dict[str, dict] = {}
+        self._path = Path(db_path) if db_path else None
+        self._emotes: dict[str, str] = {}
 
     async def load(self) -> None:
-        """Load the emote cache once at startup (a broken file starts empty)."""
-        if not self._db_path:
+        self._emotes.clear()
+        if self._path is None:
             return
-        db = pickledb.PickleDB(self._db_path)
-        await _load_or_start_empty(db, "emote")
-        try:
-            for key in await db.all():
-                value = await db.get(key)
-                if value is not None:
-                    self._emotes[key] = value
-        except (FileNotFoundError, ValueError, OSError) as exc:
-            # Partial reads keep whatever was accumulated — some emotes beat none
-            LOGGER.warning("Stopped reading emote DB early: %s", exc)
-        LOGGER.info("Loaded %d emotes from %s", len(self._emotes), self._db_path)
+        values = await _load_or_start_empty(self._path, "emote")
+        for name, entry in values.items():
+            if len(self._emotes) >= MAX_EMOTES:
+                break
+            if (
+                not isinstance(name, str)
+                or len(name) > 100
+                or not isinstance(entry, dict)
+            ):
+                continue
+            url = entry.get("url_2x")
+            if not isinstance(url, str) or len(url) > 2048:
+                continue
+            try:
+                parsed = urlsplit(url)
+                if (
+                    parsed.scheme != "https"
+                    or not parsed.hostname
+                    or parsed.username
+                    or parsed.password
+                ):
+                    continue
+            except ValueError:
+                continue
+            self._emotes[name] = url
+        LOGGER.info("Loaded %d emotes from %s", len(self._emotes), self._path)
 
     def lookup(self, name: str) -> str | None:
-        """Return the 2x image URL for an emote name, or None if unknown.
-
-        An entry missing "url_2x" is treated as unknown rather than raising —
-        callers drop unresolvable emotes from the overlay list.
-        """
-        entry = self._emotes.get(name)
-        return entry.get("url_2x") if entry else None
+        return self._emotes.get(name)
 
 
 class AnnounceTracker:
-    """Tracks each user's last-message time to rate-limit name announcements."""
+    """Bounded announcement windows, checkpointed at most every 30 seconds."""
 
-    def __init__(self, db_path: str, window_secs: int) -> None:
-        """Create the tracker.
-
-        Args:
-            db_path: Path of the pickledb JSON file holding username → timestamp.
-            window_secs: Seconds of silence before a user's name is re-announced.
-        """
-        self._db = pickledb.PickleDB(db_path)
+    def __init__(
+        self, db_path: str, window_secs: int, *, flush_interval_secs: float = 30.0
+    ) -> None:
+        if window_secs < 0 or not math.isfinite(window_secs):
+            raise ValueError("Announcement window must be finite and nonnegative")
+        if flush_interval_secs < 0 or not math.isfinite(flush_interval_secs):
+            raise ValueError("Flush interval must be finite and nonnegative")
+        self._path = Path(db_path)
         self._window_secs = window_secs
+        self._flush_interval_secs = flush_interval_secs
+        self._timestamps: OrderedDict[str, Any] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._last_flush = time.monotonic()
+        self._dirty = False
 
     async def load(self) -> None:
-        """Load the DB file once at startup (missing/corrupt files start empty)."""
-        await _load_or_start_empty(self._db, "timestamp")
+        values = await _load_or_start_empty(self._path, "timestamp")
+        self._timestamps.clear()
+        now = time.time()
+        for name, value in values.items():
+            if not isinstance(name, str) or len(name) > 100:
+                self._dirty = True
+                continue
+            try:
+                if isinstance(value, bool):
+                    raise ValueError("boolean timestamp")
+                timestamp = float(value)
+                if not math.isfinite(timestamp) or timestamp < 0 or timestamp > now:
+                    raise ValueError("invalid timestamp")
+            except TypeError, ValueError, OverflowError:
+                LOGGER.warning(
+                    "Unreadable last-seen value for %s; treating as new", name
+                )
+                self._dirty = True
+                continue
+            self._timestamps[name.casefold()] = str(timestamp)
+        while len(self._timestamps) > MAX_ANNOUNCE_USERS:
+            self._timestamps.popitem(last=False)
+            self._dirty = True
+
+    async def _flush_locked(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            await _save(self._path, self._timestamps)
+        except OSError, ValueError:
+            LOGGER.exception("Could not checkpoint announcement timestamps")
+        else:
+            self._dirty = False
+        self._last_flush = time.monotonic()
+
+    async def flush(self) -> None:
+        """Persist pending timestamps; the composition root calls this at shutdown."""
+        async with self._lock:
+            await self._flush_locked()
 
     async def claim(self, username: str) -> bool:
-        """Atomically check the announce window and record the message timestamp.
-
-        Returns True when more than window_secs have passed since the user's
-        last message (or this is their first message), meaning the caller
-        should prepend the "username says:" prefix.  The timestamp is always
-        updated, even when no announcement is due.
-
-        Owning the lock here (rather than relying on callers to pair a
-        separate check and update under it) makes the check-then-update atomic
-        by construction, so two concurrent messages from the same user cannot
-        both claim the prefix.
-
-        A stored value that cannot be read as a number (a hand-edited file, a
-        half-written save) is reported and treated as "never seen", which
-        announces the user and — because the write below happens either way —
-        replaces the unreadable value with a good one.  Raising instead would
-        be worse than useless: the write would never be reached, so the entry
-        could never repair itself and every later message from that user would
-        fail the same way, leaving them permanently un-announced.
-        """
+        username = username.casefold()
         async with self._lock:
-            # One timestamp for the whole operation.  The comparison and the
-            # value written down are the same instant conceptually, so reading
-            # the clock twice can only introduce a small disagreement between
-            # them for no benefit.
             now = time.time()
-            last = await self._db.get(username)
+            last = self._timestamps.get(username)
             announce = True
-            if last:
+            if last is not None:
                 try:
-                    announce = (now - float(last)) > self._window_secs
-                except TypeError, ValueError:
+                    previous = float(last)
+                    if not math.isfinite(previous) or previous > now or previous < 0:
+                        raise ValueError("invalid timestamp")
+                    announce = now - previous > self._window_secs
+                except TypeError, ValueError, OverflowError:
                     LOGGER.warning(
-                        "Unreadable last-seen value %r for %s — treating as new",
-                        last,
-                        username,
+                        "Unreadable last-seen value for %s; treating as new", username
                     )
-            # The timestamp goes to disk as a string rather than a number
-            # because that is the shape every existing timestamps.json already
-            # holds.  Writing numbers instead would not let the float() call
-            # above go away — files written by older versions still contain
-            # strings — so it would only widen what the reader must accept,
-            # forever, in exchange for nothing.
-            await self._db.set(username, str(now))
-            await self._db.save()
-        return announce
+            self._timestamps[username] = str(now)
+            self._timestamps.move_to_end(username)
+            while len(self._timestamps) > MAX_ANNOUNCE_USERS:
+                self._timestamps.popitem(last=False)
+            self._dirty = True
+            if time.monotonic() - self._last_flush >= self._flush_interval_secs:
+                await self._flush_locked()
+            return announce

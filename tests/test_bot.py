@@ -15,10 +15,19 @@ and building one would test twitchio's parser rather than our logic.
 """
 
 from dataclasses import dataclass, field
+import asyncio
+import datetime
+from collections import OrderedDict
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from voxer.bot import classify_subscribe_errors, oauth_start_url, split_fragments
+from voxer.bot import OAUTH_SCOPES, VoxBot
+from voxer import config
+from twitchio.ext import commands
+from twitchio.authentication import ValidateTokenPayload
 
 
 @dataclass(frozen=True)
@@ -150,11 +159,13 @@ class TestOauthStartUrl:
         bind host is often 0.0.0.0 (so Docker can publish the port), and
         0.0.0.0 is an address to listen on, not one a browser can visit.
         """
-        assert oauth_start_url(redirect_url, 4343) == "http://localhost:4343/oauth"
+        assert oauth_start_url(redirect_url, 4343) == redirect_url.removesuffix(
+            "/callback"
+        )
 
-    def test_the_port_argument_is_the_one_used(self) -> None:
+    def test_the_registered_redirect_port_is_authoritative(self) -> None:
         url = oauth_start_url("http://localhost:4343/oauth/callback", 9999)
-        assert url == "http://localhost:9999/oauth"
+        assert url == "http://localhost:4343/oauth"
 
     def test_public_domain_gives_an_https_link_and_ignores_the_port(self) -> None:
         """A public deployment is reached through its domain, over HTTPS.
@@ -167,12 +178,177 @@ class TestOauthStartUrl:
         url = oauth_start_url("https://bot.example.org/oauth/callback", 4343)
         assert url == "https://bot.example.org/oauth"
 
-    def test_the_redirect_path_does_not_leak_into_the_start_url(self) -> None:
-        """These are two different routes on the same adapter.
 
-        The redirect URL is where Twitch sends the browser *back* with a code;
-        the start URL is where the human begins.  A custom redirect path must
-        not be pasted onto the start link.
-        """
-        url = oauth_start_url("https://bot.example.org/twitch/cb", 4343)
-        assert url == "https://bot.example.org/oauth"
+def make_bot(queue_size: int = 4) -> VoxBot:
+    """Exercise event admission without starting TwitchIO's network lifecycle."""
+    bot = object.__new__(VoxBot)
+    bot._bot_id = "123"
+    bot._message_queue = asyncio.Queue(maxsize=queue_size)
+    bot._max_message_chars = 500
+    bot._user_cooldown_secs = 2
+    bot._seen_events = OrderedDict()
+    bot._user_last_message = OrderedDict()
+    bot._avatar_url_cache = OrderedDict()
+    bot._avatar_pending = set()
+    bot._token_admission_lock = asyncio.Lock()
+    bot._http = SimpleNamespace(_app_token="existing-app", _tokens={})
+    bot.fetch_user = AsyncMock(return_value=None)
+    return bot
+
+
+def chat(text: str = "hello", *, user_id: str = "456", event_id: str = "message"):
+    return SimpleNamespace(
+        id=event_id,
+        fragments=[StubFragment("text", text)],
+        chatter=SimpleNamespace(id=user_id, name="viewer"),
+        broadcaster=SimpleNamespace(id="123"),
+        source_broadcaster=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", ["full", "oversized", "self", "command", "other-channel", "shared-chat"]
+)
+async def test_dropped_chat_does_not_fetch_an_avatar(reason, monkeypatch):
+    bot = make_bot(queue_size=1)
+    payload = chat()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    if reason == "full":
+        bot._message_queue.put_nowait(object())
+    elif reason == "oversized":
+        payload.fragments = [StubFragment("text", "x" * 501)]
+    elif reason == "self":
+        payload.chatter.id = "123"
+    elif reason == "command":
+        payload.fragments = [StubFragment("text", "!help")]
+    elif reason == "other-channel":
+        payload.broadcaster.id = "789"
+    else:
+        payload.source_broadcaster = SimpleNamespace(id="789")
+    await bot.event_message(payload)
+    bot.fetch_user.assert_not_awaited()
+    assert bot._message_queue.qsize() == (1 if reason == "full" else 0)
+
+
+@pytest.mark.asyncio
+async def test_chat_deduplication_and_user_cooldown(monkeypatch):
+    bot = make_bot()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    await bot.event_message(chat())
+    await bot.event_message(chat())
+    await bot.event_message(chat(event_id="next"))
+    await bot.event_message(chat(user_id="other", event_id="other"))
+    assert bot._message_queue.qsize() == 2
+    assert bot.fetch_user.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_system_queue_overflow_does_not_wait():
+    bot = make_bot(queue_size=1)
+    await bot._enqueue_system("one", "first")
+    await asyncio.wait_for(bot._enqueue_system("two", "second"), timeout=0.1)
+    assert bot._message_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_system_redelivery_is_not_announced_twice():
+    bot = make_bot()
+    event = SimpleNamespace(
+        metadata=SimpleNamespace(message_id="delivery"),
+        broadcaster=SimpleNamespace(id="123"),
+        user=SimpleNamespace(name="viewer"),
+    )
+    await bot.event_follow(event)
+    await bot.event_follow(event)
+    assert bot._message_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_avatar_misses_are_negative_cached_and_cache_is_bounded():
+    bot = make_bot()
+    bot.fetch_user.side_effect = RuntimeError("Twitch is unavailable")
+    user = SimpleNamespace(id="456", name="viewer")
+    assert await bot._get_avatar_url(user) is None
+    assert await bot._get_avatar_url(user) is None
+    bot.fetch_user.assert_awaited_once()
+    bot._avatar_url_cache = OrderedDict(
+        (str(i), (float("inf"), None)) for i in range(2048)
+    )
+    await bot._get_avatar_url(SimpleNamespace(id="new", name="new"))
+    assert len(bot._avatar_url_cache) == 2048
+
+
+def test_admission_memory_is_bounded():
+    bot = make_bot()
+    for index in range(4100):
+        assert bot._accept_event(chat(event_id=str(index)))
+        assert bot._accept_chatter(str(index))
+    assert len(bot._seen_events) == len(bot._user_last_message) == 4096
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["user", "client", "scopes"])
+async def test_invalid_oauth_tokens_are_removed(invalid, monkeypatch):
+    bot = make_bot()
+    validated = SimpleNamespace(
+        user_id="123", client_id=config.CLIENT_ID, scopes=list(OAUTH_SCOPES)
+    )
+    if invalid == "user":
+        validated.user_id = "someone-else"
+    elif invalid == "client":
+        validated.client_id = "another-application"
+    else:
+        validated.scopes = []
+    monkeypatch.setattr(
+        commands.AutoBot, "add_token", AsyncMock(return_value=validated)
+    )
+    bot.remove_token = AsyncMock()
+    with pytest.raises(ValueError, match="wrong account"):
+        await bot.add_token("access", "refresh")
+    assert bot._http._app_token == "existing-app"
+    assert bot._http._tokens == {}
+
+
+def test_the_redirect_path_does_not_leak_into_the_start_url() -> None:
+    """The callback path and browser authorization start route are independent."""
+    url = oauth_start_url("https://bot.example.org/twitch/cb", 4343)
+    assert url == "https://bot.example.org/oauth"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kind", ["app", "foreign-app", "under-scoped-user", "foreign-client-user"]
+)
+async def test_rejected_grant_preserves_existing_managed_tokens(kind, monkeypatch):
+    """Exercise TwitchIO's real mutation before rejection, not a stubbed add_token."""
+    bot = VoxBot(bot_id="123", message_queue=asyncio.Queue(maxsize=1))
+    monkeypatch.setattr(bot, "save_tokens", AsyncMock())
+    bot._http._app_token = "known-good-app"
+    existing_user = {
+        "user_id": "123",
+        "token": "known-good-user",
+        "refresh": "known-good-refresh",
+        "last_validated": datetime.datetime.now().isoformat(),
+    }
+    bot._http._tokens["123"] = existing_user.copy()
+    validated = ValidateTokenPayload(
+        {
+            "client_id": "other-application"
+            if kind.startswith("foreign")
+            else config.CLIENT_ID,
+            "user_id": None if kind in ("app", "foreign-app") else "123",
+            "login": "bot",
+            "scopes": [] if kind == "under-scoped-user" else list(OAUTH_SCOPES),
+            "expires_in": 36000,
+        }
+    )
+    isolated = bot._http._ManagedHTTPClient__isolated
+    monkeypatch.setattr(isolated, "validate_token", AsyncMock(return_value=validated))
+    try:
+        with pytest.raises(ValueError, match="wrong account"):
+            await bot.add_token("rejected-token", "rejected-refresh")
+        assert bot._http._app_token == "known-good-app"
+        assert bot._http._tokens == {"123": existing_user}
+    finally:
+        await bot.close()

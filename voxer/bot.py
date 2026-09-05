@@ -22,9 +22,12 @@ are persisted to config.TOKEN_FILE and auto-refreshed by twitchio.
 
 import asyncio
 import logging
+import time
 import webbrowser
+from collections import OrderedDict
 from collections.abc import Iterable
 from typing import Final
+from urllib.parse import urlsplit
 
 import twitchio
 from twitchio import (
@@ -51,6 +54,8 @@ from .events import (
     sub_message,
 )
 from .models import MessageKind, QueuedMessage
+from .oauth import SecureOAuthAdapter
+from .token_store import TokenFileLock, read_tokens, write_json_atomic
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -172,9 +177,9 @@ def oauth_start_url(redirect_url: str, oauth_port: int) -> str:
     Returns:
         An absolute URL ending in ``/oauth``.
     """
-    domain, _ = config.parse_redirect_url(redirect_url)
-    if domain:
-        return f"https://{domain}/oauth"
+    parsed = urlsplit(redirect_url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/oauth"
     return f"http://localhost:{oauth_port}/oauth"
 
 
@@ -231,6 +236,8 @@ class VoxBot(commands.AutoBot):
         *,
         bot_id: str,
         message_queue: asyncio.Queue["QueuedMessage"],
+        max_message_chars: int = config.MAX_MESSAGE_CHARS,
+        user_cooldown_secs: float = config.USER_COOLDOWN_SECS,
     ) -> None:
         """Initialize the Twitch bot with its message queue.
 
@@ -239,7 +246,19 @@ class VoxBot(commands.AutoBot):
             message_queue: Queue for dispatching chat messages to the handler.
         """
         self._message_queue = message_queue
-        self._avatar_url_cache: dict[str, str | None] = {}
+        if max_message_chars < 1 or user_cooldown_secs < 0:
+            raise ValueError("Message limit must be positive and cooldown nonnegative")
+        self._max_message_chars = max_message_chars
+        self._user_cooldown_secs = user_cooldown_secs
+        self._avatar_url_cache: OrderedDict[str, tuple[float, str | None]] = (
+            OrderedDict()
+        )
+        self._avatar_pending: set[str] = set()
+        self._seen_events: OrderedDict[str, float] = OrderedDict()
+        self._user_last_message: OrderedDict[str, float] = OrderedDict()
+        self._token_owner: TokenFileLock | None = None
+        self._token_save_lock = asyncio.Lock()
+        self._token_admission_lock = asyncio.Lock()
         # Set once a user token for the bot's own account is available (loaded
         # from the token file, seeded from env, or granted via the browser
         # OAuth flow).  ensure_authorized() awaits it before chat-dependent
@@ -262,23 +281,24 @@ class VoxBot(commands.AutoBot):
             # The registered redirect URL is configured as one env var
             # (VOXER_OAUTH_REDIRECT_URL) and split into the domain/path
             # arguments the adapter expects.
-            adapter=self._build_adapter(),
+            adapter=self._build_adapter(bot_id),
         )
 
     @staticmethod
-    def _build_adapter() -> AiohttpAdapter:
+    def _build_adapter(bot_id: str) -> AiohttpAdapter:
         """Build the OAuth web adapter from the configured redirect URL.
 
         config.OAUTH_REDIRECT_URL (env VOXER_OAUTH_REDIRECT_URL) is the single
         source of truth for the URL registered in the Twitch dev console; it is
         split into the domain/redirect_path arguments the adapter expects.
         """
-        domain, redirect_path = config.parse_redirect_url(config.OAUTH_REDIRECT_URL)
-        return AiohttpAdapter(
+        return SecureOAuthAdapter(
+            redirect_url=config.OAUTH_REDIRECT_URL,
+            expected_user_id=bot_id,
+            client_id=config.CLIENT_ID,
+            scopes=OAUTH_SCOPES,
             host=config.OAUTH_HOST,
             port=config.OAUTH_PORT,
-            domain=domain,
-            redirect_path=redirect_path,
         )
 
     # ── Token persistence ─────────────────────────────────────────────────────
@@ -288,11 +308,58 @@ class VoxBot(commands.AutoBot):
 
     async def load_tokens(self, path: str | None = None, /) -> None:
         """Load stored user tokens from the configured token file."""
-        await super().load_tokens(path or config.TOKEN_FILE)
+        target = path or config.TOKEN_FILE
+        if self._token_owner is None:
+            self._token_owner = TokenFileLock(target)
+            self._token_owner.acquire()
+        try:
+            tokens = await asyncio.to_thread(read_tokens, target)
+        except OSError, ValueError:
+            LOGGER.warning(
+                "Stored token file is unreadable; browser authorization required"
+            )
+            return
+        entry = tokens.get(self.bot_id)
+        if not isinstance(entry, dict):
+            return
+        token, refresh = entry.get("token"), entry.get("refresh")
+        if not isinstance(token, str) or not isinstance(refresh, str):
+            return
+        try:
+            await self.add_token(token, refresh)
+        except Exception:
+            LOGGER.warning(
+                "Stored Twitch token is invalid or lacks required permissions"
+            )
+        else:
+            await self.save_tokens(target)
 
     async def save_tokens(self, path: str | None = None, /) -> None:
         """Persist all user tokens to the configured token file."""
-        await super().save_tokens(path or config.TOKEN_FILE)
+        async with self._token_save_lock:
+            tokens = {key: dict(value) for key, value in self.tokens.items()}
+            if not tokens:
+                return
+            target = path or config.TOKEN_FILE
+            if self._token_owner is None:
+                self._token_owner = TokenFileLock(target)
+                self._token_owner.acquire()
+            task = asyncio.create_task(
+                asyncio.to_thread(write_json_atomic, target, tokens)
+            )
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+
+    async def close(self, **kwargs: object) -> None:
+        """Release credential ownership only after TwitchIO finishes saving."""
+        try:
+            await super().close(**kwargs)
+        finally:
+            if self._token_owner is not None:
+                self._token_owner.close()
 
     async def event_token_refreshed(self, _payload: object) -> None:
         """Persist tokens every time twitchio rotates a refresh token.
@@ -334,11 +401,10 @@ class VoxBot(commands.AutoBot):
             LOGGER.info("Seeding token store from TWITCH_ACCESS_TOKEN/REFRESH_TOKEN")
             try:
                 resp = await self.add_token(config.ACCESS_TOKEN, config.REFRESH_TOKEN)
-            except Exception as exc:
+            except Exception:
                 LOGGER.warning(
-                    "Seed tokens are invalid or expired (%s) — "
-                    "falling back to browser authorization",
-                    exc,
+                    "Seed tokens are invalid, expired or under-scoped; "
+                    "falling back to browser authorization"
                 )
             else:
                 if resp.user_id == self.bot_id:
@@ -390,23 +456,69 @@ class VoxBot(commands.AutoBot):
         cache_key = str(chatter.id or chatter.name or "")
         if not cache_key:
             return None
-        if cache_key in self._avatar_url_cache:
-            return self._avatar_url_cache[cache_key]
-
-        try:
-            if chatter.id:
-                user = await self.fetch_user(id=chatter.id)
-            else:
-                user = await self.fetch_user(login=chatter.name)
-        except Exception as exc:
-            LOGGER.warning("Could not fetch avatar for %s: %s", cache_key, exc)
+        now = time.monotonic()
+        cached = self._avatar_url_cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            self._avatar_url_cache.move_to_end(cache_key)
+            return cached[1]
+        if cache_key in self._avatar_pending or len(self._avatar_pending) >= 8:
             return None
-
-        # fetch_user is typed `User | None` — a deleted or renamed account
-        # resolves to nothing, and the overlay simply shows no avatar.
-        avatar_url = user.profile_image.url if user is not None else None
-        self._avatar_url_cache[cache_key] = avatar_url
+        self._avatar_pending.add(cache_key)
+        avatar_url = None
+        lifetime = 3600
+        try:
+            async with asyncio.timeout(3):
+                if chatter.id:
+                    user = await self.fetch_user(id=chatter.id)
+                else:
+                    user = await self.fetch_user(login=chatter.name)
+            avatar_url = user.profile_image.url if user is not None else None
+        except Exception:
+            lifetime = 30
+            LOGGER.debug("Could not fetch avatar for %s", cache_key)
+        finally:
+            self._avatar_pending.discard(cache_key)
+        self._avatar_url_cache[cache_key] = (now + lifetime, avatar_url)
+        self._avatar_url_cache.move_to_end(cache_key)
+        while len(self._avatar_url_cache) > 2048:
+            self._avatar_url_cache.popitem(last=False)
         return avatar_url
+
+    def _accept_event(self, payload: object) -> bool:
+        """Reject other channels and redelivered EventSub notifications."""
+        broadcaster = getattr(payload, "broadcaster", None) or getattr(
+            payload, "to_broadcaster", None
+        )
+        if broadcaster is not None and str(broadcaster.id) != self.bot_id:
+            return False
+        metadata = getattr(payload, "metadata", None) or getattr(
+            payload, "headers", None
+        )
+        receipt_id = getattr(metadata, "message_id", None)
+        event_id = getattr(payload, "id", None) or receipt_id
+        if not event_id:
+            return True
+        key = f"{type(payload).__name__}:{event_id}"
+        now = time.monotonic()
+        while self._seen_events and next(iter(self._seen_events.values())) <= now:
+            self._seen_events.popitem(last=False)
+        if key in self._seen_events:
+            return False
+        self._seen_events[key] = now + 600
+        while len(self._seen_events) > 4096:
+            self._seen_events.popitem(last=False)
+        return True
+
+    def _accept_chatter(self, user_id: str) -> bool:
+        now = time.monotonic()
+        previous = self._user_last_message.get(user_id)
+        if previous is not None and now - previous < self._user_cooldown_secs:
+            return False
+        self._user_last_message[user_id] = now
+        self._user_last_message.move_to_end(user_id)
+        while len(self._user_last_message) > 4096:
+            self._user_last_message.popitem(last=False)
+        return True
 
     async def event_message(self, payload: ChatMessage) -> None:
         """Handle incoming Twitch chat message by enqueuing it for TTS processing.
@@ -417,13 +529,29 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Chat message event from EventSub.
         """
+        if not self._accept_event(payload) or self._message_queue.full():
+            return
+        if str(payload.chatter.id) == self.bot_id:
+            return
+        source = getattr(payload, "source_broadcaster", None)
+        if source is not None and str(source.id) != self.bot_id:
+            return
+        if (
+            sum(len(fragment.text) for fragment in payload.fragments)
+            > self._max_message_chars
+        ):
+            return
         tts_text, emote_names = split_fragments(payload.fragments)
+        if tts_text.lstrip().startswith("!"):
+            await super().event_message(payload)
+            return
+        if not tts_text and not emote_names:
+            return
+        if not self._accept_chatter(str(payload.chatter.id or payload.chatter.name)):
+            return
         avatar_url = await self._get_avatar_url(payload.chatter)
-        LOGGER.info(
-            "Received message: %s — text=%r emotes=%r",
-            payload.chatter.name,
-            tts_text,
-            emote_names,
+        LOGGER.debug(
+            "Received chat from %s (%d characters)", payload.chatter.name, len(tts_text)
         )
         # put_nowait, not put: when synthesis is backed up, dropping a chat line
         # is better than queueing it to be spoken long after it was sent.  The
@@ -438,8 +566,8 @@ class VoxBot(commands.AutoBot):
                 )
             )
         except asyncio.QueueFull:
-            LOGGER.warning(
-                "Message queue full — dropping message from %s", payload.chatter.name
+            LOGGER.debug(
+                "Message queue full; dropping chat from %s", payload.chatter.name
             )
         # Call super() so twitchio can route any "!" prefixed commands
         await super().event_message(payload)
@@ -454,13 +582,12 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: OAuth authorization payload with user_id and tokens.
         """
-        await self.add_token(payload.access_token, payload.refresh_token)
-
-        if payload.user_id is None:
+        if payload.user_id != self.bot_id:
             # Twitch guarantees user_id on the authorization-code grant; this
             # guard exists because the payload type marks it optional.
-            LOGGER.warning("OAuth payload without user_id — skipping subscriptions")
+            LOGGER.warning("Ignoring OAuth grant for an unconfigured account")
             return
+        validated = await self.add_token(payload.access_token, payload.refresh_token)
 
         if payload.user_id == self.bot_id:
             # Unblock ensure_authorized() as soon as the token is in the store.
@@ -483,7 +610,8 @@ class VoxBot(commands.AutoBot):
                 config.TOKEN_FILE,
             )
 
-        await self.subscribe_for(payload.user_id)
+        if validated.user_id is not None:
+            await self.subscribe_for(validated.user_id)
 
     async def subscribe_for(self, user_id: str) -> None:
         """Register all per-broadcaster EventSub subscriptions for one channel.
@@ -498,6 +626,8 @@ class VoxBot(commands.AutoBot):
         Args:
             user_id: Numeric Twitch user ID of the broadcaster to subscribe to.
         """
+        if user_id != self.bot_id:
+            raise ValueError("Only the configured bot channel may be subscribed")
         # Full set of per-broadcaster subscriptions.
         # Each maps to a VoxBot.event_* handler below.
         subs: list[eventsub.SubscriptionPayload] = [
@@ -553,9 +683,32 @@ class VoxBot(commands.AutoBot):
         Returns:
             Token validation response with user ID and expiration.
         """
-        resp: ValidateTokenPayload = await super().add_token(token, refresh)
-        LOGGER.info("Added token for user: %s", resp.user_id)
-        return resp
+        async with self._token_admission_lock:
+            # TwitchIO mutates its managed store before returning validation:
+            # app grants replace _app_token, while user grants replace their row.
+            # Preserve the previous grants so rejecting an input cannot log the
+            # running bot out. Keep TwitchIO's expired-token refresh behavior.
+            previous_app_token = self._http._app_token
+            previous_user_tokens = self._http._tokens.copy()
+            resp: ValidateTokenPayload = await super().add_token(token, refresh)
+            if (
+                resp.user_id != self.bot_id
+                or resp.client_id != config.CLIENT_ID
+                or not set(OAUTH_SCOPES.selected).issubset(resp.scopes)
+            ):
+                if resp.user_id is None:
+                    self._http._app_token = previous_app_token
+                elif resp.user_id in previous_user_tokens:
+                    self._http._tokens[resp.user_id] = previous_user_tokens[
+                        resp.user_id
+                    ]
+                else:
+                    self._http._tokens.pop(resp.user_id, None)
+                raise ValueError(
+                    "Twitch token has the wrong account, application or scopes"
+                )
+            LOGGER.info("Added token for user: %s", resp.user_id)
+            return resp
 
     async def send_chat(self, text: str) -> None:
         """Send a message to the bot's own Twitch channel.
@@ -571,7 +724,9 @@ class VoxBot(commands.AutoBot):
         Args:
             text: Message to send (max 500 chars enforced by Twitch API).
         """
-        LOGGER.info("Sending to chat: %r", text)
+        if not text.strip() or len(text) > 500:
+            raise ValueError("Outgoing chat must contain 1 to 500 characters")
+        LOGGER.debug("Sending scheduled chat (%d characters)", len(text))
         pu = self.create_partialuser(self.bot_id)
         await pu.send_message(sender=self.bot_id, message=text)
 
@@ -588,17 +743,23 @@ class VoxBot(commands.AutoBot):
     async def _enqueue_system(self, username: str, text: str) -> None:
         """Wrap an announcement in a SYSTEM-kind QueuedMessage and enqueue it.
 
-        Unlike chat messages, this awaits room in the queue rather than dropping.
-        Follows, subs, cheers and raids are rare and high-value: waiting out a
-        backlog is better than silently losing a raid alert.
+        Overflow is dropped immediately so event bursts cannot create an
+        unbounded population of coroutines waiting for queue capacity.
 
         Args:
             username: Display name for the overlay ("anonymous" for hidden gifters).
             text: Ready-to-speak announcement string from events.py.
         """
-        await self._message_queue.put(
-            QueuedMessage(username=username, text=text, kind=MessageKind.SYSTEM)
-        )
+        try:
+            self._message_queue.put_nowait(
+                QueuedMessage(
+                    username=username,
+                    text=text[: self._max_message_chars],
+                    kind=MessageKind.SYSTEM,
+                )
+            )
+        except asyncio.QueueFull:
+            LOGGER.debug("Message queue full; dropping announcement from %s", username)
 
     async def event_follow(self, payload: twitchio.ChannelFollow) -> None:
         """Announce a new channel follow via TTS.
@@ -606,6 +767,8 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Follow event with the new follower's info.
         """
+        if not self._accept_event(payload):
+            return
         username = _display_name(payload.user)
         LOGGER.info("New follow from %s", username)
         await self._enqueue_system(username, follow_message(username))
@@ -619,7 +782,7 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Subscribe event with subscriber info and tier.
         """
-        if payload.gift:
+        if not self._accept_event(payload) or payload.gift:
             return  # gift subscriptions are handled by event_subscription_gift
         username = _display_name(payload.user)
         LOGGER.info("New subscription from %s (tier %s)", username, payload.tier)
@@ -635,6 +798,8 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Gift subscription event with gifter info and gift count.
         """
+        if not self._accept_event(payload):
+            return
         username = payload.user.name if payload.user else None
         display = username or _ANONYMOUS_USER
         LOGGER.info("Gift sub from %s: %d subs", display, payload.total)
@@ -651,6 +816,8 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Resub event with subscriber info and cumulative month count.
         """
+        if not self._accept_event(payload):
+            return
         username = _display_name(payload.user)
         LOGGER.info("Resub from %s (%d months)", username, payload.cumulative_months)
         await self._enqueue_system(
@@ -665,6 +832,8 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Cheer event with cheerer info and bit count.
         """
+        if not self._accept_event(payload):
+            return
         username = payload.user.name if payload.user else None
         display = username or _ANONYMOUS_USER
         LOGGER.info("Cheer from %s: %d bits", display, payload.bits)
@@ -676,6 +845,8 @@ class VoxBot(commands.AutoBot):
         Args:
             payload: Raid event with raiding broadcaster info and viewer count.
         """
+        if not self._accept_event(payload):
+            return
         raider = _display_name(payload.from_broadcaster)
         viewers = payload.viewer_count
         LOGGER.info("Raid from %s with %d viewers", raider, viewers)

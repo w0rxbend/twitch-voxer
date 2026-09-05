@@ -298,6 +298,8 @@ class TestValidateConfig:
             (("TWITCH_CLIENT_ID", "an-id"), ("TWITCH_CLIENT_SECRET", "a-secret")),
         )
         monkeypatch.setattr(config, "BOT_USERNAME", "examplebot")
+        monkeypatch.setattr(config, "SERVER_HOST", "127.0.0.1")
+        monkeypatch.setattr(config, "OVERLAY_TOKEN", "")
         monkeypatch.setattr(
             config, "OAUTH_REDIRECT_URL", "http://localhost:4343/oauth/callback"
         )
@@ -342,3 +344,73 @@ class TestValidateConfig:
         )
         with pytest.raises(RuntimeError, match="VOXER_OAUTH_REDIRECT_URL"):
             config.validate_config()
+
+    def test_rejects_a_local_callback_on_a_different_port(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(config, "OAUTH_PORT", 4343)
+        monkeypatch.setattr(
+            config, "OAUTH_REDIRECT_URL", "http://localhost:9999/oauth/callback"
+        )
+        with pytest.raises(config.ConfigError, match="port must match"):
+            config.validate_config()
+
+
+class TestOverlayAccess:
+    @pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "127.0.0.2", "::1"])
+    def test_loopback_can_run_without_a_token(self, host: str) -> None:
+        config.validate_overlay_access(host, "")
+
+    @pytest.mark.parametrize(
+        "host", ["0.0.0.0", "::", "192.168.1.2", "tts.example.org"]
+    )
+    def test_network_listener_requires_a_token(self, host: str) -> None:
+        with pytest.raises(config.ConfigError, match="VOXER_OVERLAY_TOKEN"):
+            config.validate_overlay_access(host, "")
+        config.validate_overlay_access(host, "a" * 43)
+
+    @pytest.mark.parametrize(
+        "token", ["short", "a" * 257, "a" * 31 + "!", "a" * 31 + "\n"]
+    )
+    def test_invalid_tokens_are_rejected_without_echoing_them(self, token: str) -> None:
+        with pytest.raises(config.ConfigError) as error:
+            config.validate_overlay_access("localhost", token)
+        assert token not in str(error.value)
+
+    def test_empty_host_does_not_accidentally_bind_every_interface(self) -> None:
+        with pytest.raises(config.ConfigError, match="VOXER_SERVER_HOST"):
+            config.validate_overlay_access("", "")
+
+
+class TestRedirectUrlSafety:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:bad/oauth/callback",
+            "http://localhost:65536/oauth/callback",
+            "http://[invalid/oauth/callback",
+            "https://user:password@bot.example.org/oauth/callback",
+            "https://bot.example.org/oauth/callback?extra=1",
+            "https://bot.example.org/oauth/callback#token",
+        ],
+    )
+    def test_unusable_redirects_fail_at_startup(self, url: str) -> None:
+        with pytest.raises(config.ConfigError, match="VOXER_OAUTH_REDIRECT_URL"):
+            config.validate_redirect_url(url)
+
+    def test_public_redirect_retains_its_explicit_port(self) -> None:
+        assert config.parse_redirect_url("https://bot.example.org:8443/auth") == (
+            "bot.example.org:8443",
+            "auth",
+        )
+
+
+class TestTrustedProxies:
+    @pytest.mark.parametrize("address", ["*", "proxy.local", "0.0.0.0/0", "::/0"])
+    def test_rejects_ambiguous_or_universal_trust(self, address: str) -> None:
+        with pytest.raises(config.ConfigError, match="VOXER_TRUSTED_PROXIES"):
+            config.validate_trusted_proxies((address,))
+
+    def test_accepts_explicit_proxy_addresses(self) -> None:
+        config.validate_trusted_proxies(())
+        config.validate_trusted_proxies(("127.0.0.1", "::1", "172.20.0.0/24"))
