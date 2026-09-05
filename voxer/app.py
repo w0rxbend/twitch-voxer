@@ -58,6 +58,7 @@ from .config import (
     SCHEDULER_INITIAL_DELAY,
     SERVER_HOST,
     SERVER_PORT,
+    SOUNDS_DIR,
     TIMESTAMPS_DB_PATH,
     TOKEN_FILE,
     TRUSTED_PROXIES,
@@ -70,6 +71,7 @@ from .log import setup_logging
 from .models import QueuedMessage
 from .scheduler import Scheduler
 from .server import AudioServer, reap_audio, sweep_audio_dir
+from .soundboard import load_sounds
 from .stores import AnnounceTracker, EmoteStore, VoiceStore
 from .tts import TTSService
 
@@ -210,6 +212,7 @@ async def run() -> None:
         broadcast=server.broadcast,
         message_queue=message_queue,
         emote_sound_paths=EMOTE_SOUND_PATHS,
+        sound_paths=load_sounds(Path(SOUNDS_DIR)),
         no_announce_users=NO_ANNOUNCE_USERS,
         max_text_chars=MAX_MESSAGE_CHARS,
         max_speech_chars=MAX_SPEECH_CHARS,

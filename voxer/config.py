@@ -21,6 +21,8 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+from .soundboard import DEFAULT_SOUNDS_DIR
+
 # Load .env into os.environ before any constant below reads from it.
 # Has no effect if the file does not exist (harmless in Docker/CI).
 load_dotenv()
@@ -155,6 +157,7 @@ TIMESTAMPS_DB_PATH: str = os.getenv("VOXER_TIMESTAMPS_DB_PATH", "data/timestamps
 MESSAGES_PATH: str = os.getenv("VOXER_MESSAGES_PATH", "data/messages.json")
 # Directory of custom voice JSON files (*.json) loaded by TTSService at startup.
 VOICES_DIR: str = os.getenv("VOXER_VOICES_DIR", "voices")
+SOUNDS_DIR: str = os.getenv("VOXER_SOUNDS_DIR", str(DEFAULT_SOUNDS_DIR))
 
 # ── HTTP / WebSocket server ───────────────────────────────────────────────────
 SERVER_HOST: str = os.getenv("VOXER_SERVER_HOST", "127.0.0.1").strip()

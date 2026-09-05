@@ -77,6 +77,8 @@ services:
       # emotes mount if you want emote images in the overlay.
       # - ./voices:/app/voices:ro
       # - ./emotes:/app/emotes:ro
+      # Override the predefined soundboard clips (keep the same MP3 filenames).
+      # - ./voxer/sounds:/app/voxer/sounds:ro
       # Supertonic model cache — survives rebuilds so the ~100 MB model is
       # downloaded only once
       - tts-cache:/home/voxer/.cache

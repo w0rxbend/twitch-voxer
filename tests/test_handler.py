@@ -134,6 +134,7 @@ def build_handler(
     async def _build(
         *,
         emote_sound_paths: list[str] | None = None,
+        sound_paths: dict[str, Path] | None = None,
         no_announce_users: frozenset[str] | None = None,
         announce_window_secs: int = 300,
         emotes: dict[str, dict[str, str]] | None = None,
@@ -171,6 +172,7 @@ def build_handler(
             broadcast=capture,
             message_queue=None,  # handle() is called directly; the queue is unused
             emote_sound_paths=emote_sound_paths,
+            sound_paths=sound_paths,
             no_announce_users=no_announce_users,
         )
 
@@ -250,6 +252,74 @@ class TestEmoteOnlyMessages:
         instance = await build_handler(emote_sound_paths=[])
         await instance.handle(QueuedMessage(username="alice", text="🎉"))
         assert broadcasts == []
+
+
+class TestSoundboard:
+    async def test_sound_uses_overlay_without_speech_or_announcement_state(
+        self, build_handler, broadcasts, fake_tts, tmp_path, audio_dir
+    ):
+        sound = tmp_path / "pop.mp3"
+        sound.write_bytes(b"downloaded-pop")
+        old = time.time() - 86400
+        os.utime(sound, (old, old))
+        instance = await build_handler(sound_paths={"pop": sound})
+        for _ in range(2):
+            await instance.handle(
+                QueuedMessage(
+                    "alice", "pop", kind=MessageKind.SOUND, avatar_url="https://avatar"
+                )
+            )
+        assert len(broadcasts) == 2
+        assert broadcasts[0].audio_url != broadcasts[1].audio_url
+        assert fake_tts.calls == []
+        assert not (tmp_path / "ts.json").exists()
+        assert not (tmp_path / "voices.json").exists()
+        for event in broadcasts:
+            played = audio_dir / Path(event.audio_url).name
+            assert played.read_bytes() == sound.read_bytes()
+            assert time.time() - played.stat().st_mtime < 60
+            assert event.username == "alice"
+            assert event.avatar_url == "https://avatar"
+
+    @pytest.mark.parametrize("reason", ["missing", "stale", "offline", "bot"])
+    async def test_unplayable_sound_does_not_fall_back_to_tts(
+        self, reason, build_handler, broadcasts, fake_tts, tmp_path, audio_dir
+    ):
+        sound = tmp_path / "pop.mp3"
+        sound.write_bytes(b"pop")
+        instance = await build_handler(sound_paths={"pop": sound})
+        message = QueuedMessage("alice", "pop", kind=MessageKind.SOUND)
+        if reason == "missing":
+            message.text = "../other"
+        elif reason == "stale":
+            message.enqueued_at = time.monotonic() - 1000
+        elif reason == "offline":
+            instance._overlay_available = lambda: False
+        else:
+            message.username = "nightbot"
+        await instance.handle(message)
+        assert broadcasts == fake_tts.calls == list(audio_dir.iterdir()) == []
+
+    @pytest.mark.parametrize("outcome", ["unheard", "error", "cancelled"])
+    async def test_sound_cleanup_preserves_source(
+        self, outcome, build_handler, tmp_path, audio_dir
+    ):
+        sound = tmp_path / "pop.mp3"
+        sound.write_bytes(b"pop")
+        error = {"error": RuntimeError, "cancelled": asyncio.CancelledError}.get(
+            outcome
+        )
+        instance = await build_handler(
+            sound_paths={"pop": sound}, broadcast_raises=error, delivered=0
+        )
+        message = QueuedMessage("alice", "pop", kind=MessageKind.SOUND)
+        if error is not None:
+            with pytest.raises(error):
+                await instance.handle(message)
+        else:
+            await instance.handle(message)
+        assert list(audio_dir.iterdir()) == []
+        assert sound.read_bytes() == b"pop"
 
 
 class TestEmoteResolution:

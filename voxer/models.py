@@ -71,11 +71,12 @@ class MessageKind(Enum):
 
     USER = auto()  # regular chatter message — full pipeline
     SYSTEM = auto()  # follow/sub/raid/cheer — spoken directly, no announce window
+    SOUND = auto()  # predefined soundboard clip — no speech synthesis
 
 
 @dataclass
 class QueuedMessage:
-    """A message waiting to be spoken via TTS."""
+    """Queued speech or a soundboard request (text holds the canonical sound name)."""
 
     username: str
     text: str

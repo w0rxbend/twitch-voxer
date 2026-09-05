@@ -26,6 +26,8 @@ import pytest
 from voxer.bot import classify_subscribe_errors, oauth_start_url, split_fragments
 from voxer.bot import OAUTH_SCOPES, VoxBot
 from voxer import config
+from voxer.models import MessageKind
+from voxer.soundboard import SOUNDS
 from twitchio.ext import commands
 from twitchio.authentication import ValidateTokenPayload
 
@@ -241,6 +243,164 @@ async def test_chat_deduplication_and_user_cooldown(monkeypatch):
     await bot.event_message(chat(user_id="other", event_id="other"))
     assert bot._message_queue.qsize() == 2
     assert bot.fetch_user.await_count == 2
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("!tts Hello, world!", "Hello, world!"),
+        ("  ! TTS\tHello\nworld!  ", "Hello\nworld!"),
+        ("!tts: Привіт, чат!", "Привіт, чат!"),
+        ("!tts = Read this", "Read this"),
+        ("hey !tts message to TTS", "message to TTS"),
+        ("before !tts say this !end ignore this", "say this"),
+    ],
+)
+async def test_tts_command_queues_only_the_body(text, expected, monkeypatch):
+    bot = make_bot()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(commands.AutoBot, "event_message", dispatch)
+    await bot.event_message(chat(text))
+    message = bot._message_queue.get_nowait()
+    assert message.kind is MessageKind.USER
+    assert message.text == expected
+    assert message.username == "viewer"
+    dispatch.assert_not_awaited()
+
+
+async def test_tts_command_preserves_emote_fragments(monkeypatch):
+    bot = make_bot()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    payload = chat()
+    payload.fragments = [
+        StubFragment("text", " !tts: hello "),
+        StubFragment("emote", "Kappa"),
+        StubFragment("text", " world"),
+    ]
+    await bot.event_message(payload)
+    message = bot._message_queue.get_nowait()
+    assert "!tts" not in message.text
+    assert message.text.strip().startswith("hello")
+    assert message.text.strip().endswith("world")
+    assert message.emote_names == ["Kappa"]
+
+
+async def test_inline_commands_queue_in_order_with_one_cooldown(monkeypatch):
+    bot = make_bot()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    await bot.event_message(
+        chat("hey !tts message !end ignore this !sound magic !s pop")
+    )
+    queued = [bot._message_queue.get_nowait() for _ in range(3)]
+    assert [(message.kind, message.text) for message in queued] == [
+        (MessageKind.USER, "message"),
+        (MessageKind.SOUND, "sparkle"),
+        (MessageKind.SOUND, "pop"),
+    ]
+    assert bot.fetch_user.await_count == 1
+    await bot.event_message(chat("!s bang", event_id="next"))
+    assert bot._message_queue.empty()
+
+
+async def test_each_tts_section_gets_only_its_own_emotes(monkeypatch):
+    bot = make_bot()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    payload = chat()
+    payload.fragments = [
+        StubFragment("emote", "Before"),
+        StubFragment("text", " !tts first "),
+        StubFragment("emote", "Kappa"),
+        StubFragment("text", " !end "),
+        StubFragment("emote", "Ignored"),
+        StubFragment("text", " !tts second "),
+        StubFragment("emote", "PogChamp"),
+    ]
+    await bot.event_message(payload)
+    first, second = bot._message_queue.get_nowait(), bot._message_queue.get_nowait()
+    assert (first.text, first.emote_names) == ("first", ["Kappa"])
+    assert (second.text, second.emote_names) == ("second", ["PogChamp"])
+
+
+@pytest.mark.parametrize("during_avatar", [False, True])
+async def test_command_sequence_is_not_partially_enqueued(during_avatar, monkeypatch):
+    bot = make_bot(queue_size=2)
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    if during_avatar:
+
+        async def lookup(chatter):
+            bot._message_queue.put_nowait("another message")
+
+        monkeypatch.setattr(bot, "_get_avatar_url", lookup)
+    else:
+        bot._message_queue.put_nowait("another message")
+    await bot.event_message(chat("!tts hello !end !sound pop"))
+    assert bot._message_queue.qsize() == 1
+    assert bot._message_queue.get_nowait() == "another message"
+
+
+async def test_invalid_command_section_does_not_swallow_valid_following_commands(
+    monkeypatch,
+):
+    bot = make_bot()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    await bot.event_message(chat("!s missing !tts !end !sound magic"))
+    message = bot._message_queue.get_nowait()
+    assert (message.kind, message.text) == (MessageKind.SOUND, "sparkle")
+    assert bot._message_queue.empty()
+
+
+@pytest.mark.parametrize("prefix", ["!sound", "!s"])
+@pytest.mark.parametrize(
+    "name, canonical",
+    [(name, sound.name) for sound in SOUNDS for name in (sound.name, *sound.aliases)],
+)
+async def test_every_sound_and_alias_is_available_to_viewers(
+    prefix, name, canonical, monkeypatch
+):
+    bot = make_bot()
+    dispatch = AsyncMock()
+    monkeypatch.setattr(commands.AutoBot, "event_message", dispatch)
+    await bot.event_message(chat(f"{prefix} {name}"))
+    message = bot._message_queue.get_nowait()
+    assert message.kind is MessageKind.SOUND
+    assert message.text == canonical
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "text", ["!tts", "!tts : ", "!sound", "!s missing", "!s ../pop"]
+)
+async def test_invalid_audio_commands_do_not_consume_cooldown(text, monkeypatch):
+    bot = make_bot()
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    await bot.event_message(chat(text))
+    bot.fetch_user.assert_not_awaited()
+    assert bot._message_queue.empty()
+    await bot.event_message(chat("!s pop", event_id="valid"))
+    assert bot._message_queue.qsize() == 1
+
+
+@pytest.mark.parametrize("text", ["!tts Hello", "!sound pop", "!s woof woof"])
+@pytest.mark.parametrize(
+    "reason", ["full", "cooldown", "duplicate", "oversized", "shared"]
+)
+async def test_audio_commands_obey_message_admission(text, reason, monkeypatch):
+    bot = make_bot(queue_size=1)
+    monkeypatch.setattr(commands.AutoBot, "event_message", AsyncMock())
+    payload = chat(text)
+    if reason == "full":
+        bot._message_queue.put_nowait(object())
+    elif reason == "cooldown":
+        bot._accept_chatter("456")
+    elif reason == "duplicate":
+        bot._accept_event(payload)
+    elif reason == "oversized":
+        bot._max_message_chars = 3
+    else:
+        payload.source_broadcaster = SimpleNamespace(id="another-channel")
+    await bot.event_message(payload)
+    bot.fetch_user.assert_not_awaited()
+    assert bot._message_queue.qsize() == (1 if reason == "full" else 0)
 
 
 @pytest.mark.asyncio

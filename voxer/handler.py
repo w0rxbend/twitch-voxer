@@ -92,6 +92,7 @@ class MessageHandler:
         broadcast: Callable[[BroadcastEvent], Awaitable[int]],
         message_queue: asyncio.Queue["QueuedMessage"],
         emote_sound_paths: list[str] | None = None,
+        sound_paths: dict[str, Path] | None = None,
         no_announce_users: frozenset[str] | None = None,
         max_text_chars: int = 500,
         max_speech_chars: int = 1000,
@@ -110,6 +111,7 @@ class MessageHandler:
                        overlay and returns how many of them received it.
             message_queue: Queue for receiving messages from the bot.
             emote_sound_paths: MP3 files to pick from randomly for emote-only messages.
+            sound_paths: Predefined soundboard names mapped to reusable MP3 files.
             no_announce_users: Usernames that never get the announcement prefix.
                                Matched case-insensitively; see below.
         """
@@ -125,6 +127,7 @@ class MessageHandler:
         self._max_speech_chars = max_speech_chars
         self._max_message_age_secs = max_message_age_secs
         self._overlay_available = overlay_available
+        self._sound_paths = dict(sound_paths or {})
         self._synthesis_lock = asyncio.Lock()
         self._language_lock = asyncio.Lock()
 
@@ -348,6 +351,12 @@ class MessageHandler:
             return
         sound = random.choice(self._emote_sounds)
         LOGGER.info("Emote-only from %s — playing %s", message.username, sound.name)
+        await self._play_sound(message, sound, emotes)
+
+    async def _play_sound(
+        self, message: QueuedMessage, sound: Path, emotes: list[EmoteItem]
+    ) -> None:
+        """Copy a reusable clip into the normal overlay playback lifecycle."""
         mp3_path = self._new_mp3_path()
         # Copy rather than move so the source sound file is preserved for reuse.
         # Runs in a thread — file I/O would otherwise block the event loop.
@@ -451,6 +460,14 @@ class MessageHandler:
             if not message.text:
                 return
             await self._handle_system(message)
+        elif message.kind is MessageKind.SOUND:
+            if is_bot(message.username):
+                return
+            sound = self._sound_paths.get(message.text)
+            if sound is not None:
+                await self._play_sound(
+                    message, sound, self._resolve_emotes(message.emote_names, [])
+                )
         else:
             await self._handle_user(message)
 

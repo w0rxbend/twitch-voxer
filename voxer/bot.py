@@ -45,6 +45,7 @@ from twitchio.ext import commands
 from twitchio.web import AiohttpAdapter
 
 from . import config
+from .chat_commands import parse_commands
 from .events import (
     cheer_message,
     follow_message,
@@ -55,6 +56,7 @@ from .events import (
 )
 from .models import MessageKind, QueuedMessage
 from .oauth import SecureOAuthAdapter
+from .soundboard import resolve_sound
 from .token_store import TokenFileLock, read_tokens, write_json_atomic
 
 LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -97,6 +99,9 @@ _SUBSCRIPTION_ALREADY_EXISTS: Final[int] = 409
 
 def split_fragments(
     fragments: Iterable[ChatMessageFragment],
+    *,
+    skip_chars: int = 0,
+    end_char: int | None = None,
 ) -> tuple[str, list[str]]:
     """Split a chat message's fragments into speakable text and emote names.
 
@@ -111,6 +116,8 @@ def split_fragments(
 
     Args:
         fragments: The fragment list from a chat-message event payload.
+        skip_chars: Characters of the raw command prefix to exclude from speech.
+        end_char: Exclusive raw offset where this command's argument ends.
 
     Returns:
         A ``(text, emote_names)`` pair.  Either half can be empty: an emote-only
@@ -118,9 +125,21 @@ def split_fragments(
     """
     text_parts: list[str] = []
     emote_names: list[str] = []
+    position = 0
     for fragment in fragments:
+        if end_char is not None and position >= end_char:
+            break
+        fragment_text = fragment.text
+        if end_char is not None:
+            fragment_text = fragment_text[: end_char - position]
+        position += len(fragment.text)
+        if skip_chars >= len(fragment_text):
+            skip_chars -= len(fragment_text)
+            continue
+        text = fragment_text[skip_chars:]
+        skip_chars = 0
         if fragment.type == "text":
-            text_parts.append(fragment.text)
+            text_parts.append(text)
         elif fragment.type == "emote":
             emote_names.append(fragment.text)
     return " ".join(text_parts).strip(), emote_names
@@ -269,7 +288,7 @@ class VoxBot(commands.AutoBot):
             client_secret=config.CLIENT_SECRET,
             bot_id=bot_id,
             owner_id=bot_id,
-            prefix="!",  # command prefix (no chat commands are defined yet)
+            prefix="!",
             # No constructor-time subscriptions.  Every subscription this bot
             # needs is per-broadcaster and requires a user token, so they are
             # all registered later by subscribe_for().
@@ -541,36 +560,59 @@ class VoxBot(commands.AutoBot):
             > self._max_message_chars
         ):
             return
-        tts_text, emote_names = split_fragments(payload.fragments)
-        if tts_text.lstrip().startswith("!"):
+        raw_text = "".join(fragment.text for fragment in payload.fragments)
+        parsed = parse_commands(raw_text)
+        messages: list[QueuedMessage] = []
+        username = _display_name(payload.chatter)
+        for command in parsed:
+            if command.name == "tts":
+                # Slice original fragments so emotes stay with their TTS section.
+                tts_text, emote_names = split_fragments(
+                    payload.fragments, skip_chars=command.start, end_char=command.end
+                )
+                if not tts_text:
+                    continue
+                messages.append(
+                    QueuedMessage(username, tts_text, emote_names=emote_names)
+                )
+            elif command.name in ("sound", "s"):
+                sound = resolve_sound(command.argument)
+                if sound is not None:
+                    messages.append(
+                        QueuedMessage(username, sound.name, kind=MessageKind.SOUND)
+                    )
+        if not parsed and raw_text.lstrip().startswith("!"):
             await super().event_message(payload)
             return
-        if not tts_text and not emote_names:
+        if not parsed:
+            tts_text, emote_names = split_fragments(payload.fragments)
+            if tts_text or emote_names:
+                messages.append(
+                    QueuedMessage(username, tts_text, emote_names=emote_names)
+                )
+        if not messages:
+            return
+        # A multi-command message is admitted as a whole, never half a sequence.
+        maxsize = self._message_queue.maxsize
+        if maxsize > 0 and self._message_queue.qsize() + len(messages) > maxsize:
             return
         if not self._accept_chatter(str(payload.chatter.id or payload.chatter.name)):
             return
         avatar_url = await self._get_avatar_url(payload.chatter)
         LOGGER.debug(
-            "Received chat from %s (%d characters)", payload.chatter.name, len(tts_text)
+            "Received chat from %s (%d audio actions)",
+            payload.chatter.name,
+            len(messages),
         )
-        # put_nowait, not put: when synthesis is backed up, dropping a chat line
-        # is better than queueing it to be spoken long after it was sent.  The
-        # drop is logged so a persistently overloaded bot is visible.
-        try:
-            self._message_queue.put_nowait(
-                QueuedMessage(
-                    username=_display_name(payload.chatter),
-                    text=tts_text,
-                    emote_names=emote_names,
-                    avatar_url=avatar_url,
-                )
-            )
-        except asyncio.QueueFull:
-            LOGGER.debug(
-                "Message queue full; dropping chat from %s", payload.chatter.name
-            )
-        # Call super() so twitchio can route any "!" prefixed commands
-        await super().event_message(payload)
+        # Avatar lookup yielded: recheck capacity, then enqueue without yielding
+        # so another chatter cannot interleave actions or cause a partial insert.
+        if maxsize > 0 and self._message_queue.qsize() + len(messages) > maxsize:
+            return
+        for message in messages:
+            message.avatar_url = avatar_url
+            self._message_queue.put_nowait(message)
+        if not parsed:
+            await super().event_message(payload)
 
     async def event_oauth_authorized(self, payload: UserTokenPayload) -> None:
         """Handle OAuth token authorization and subscribe to chat and channel events.

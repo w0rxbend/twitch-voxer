@@ -27,6 +27,7 @@ Keep your eyes on the game and your ears on chat. Voxer turns Twitch messages in
 | :--- | :--- |
 | 🗣️ Distinct voices | Ten built-in voices plus bundled custom styles, with assignments saved between streams. |
 | 🌍 English & Ukrainian | Automatic language detection, spoken usernames, expanded abbreviations, and readable link announcements. Other languages fall back to Ukrainian. |
+| 🔊 Chat commands & soundboard | Inline `!tts` speech and 49 bundled sound clips with `!sound` / `!s`, including aliases and ordered command sequences. |
 | 🎉 Channel moments | Spoken follow, subscription, cheer, and raid announcements. Event announcement text is Ukrainian. |
 | 🎬 Two overlay styles | A 3D speaker with glitch effects, or a lighter particle overlay. Both show the current chatter and support reduced motion. |
 | 💬 Community reminders | Editable, weighted scheduled messages posted directly to chat. |
@@ -169,7 +170,105 @@ Settings come from the environment or `.env`. Restart Voxer after changing them.
 | `VOXER_ANNOUNCE_WINDOW_SECS` | `300` | Silence before a chatter's name is spoken again. |
 | `VOXER_NO_ANNOUNCE_USERS` | Configured account | Comma-separated logins whose name prefix is skipped. Replaces the default list. |
 | `VOXER_EMOTE_SOUND_PATHS` | Two bundled MP3s | Sounds for emote-only messages. An empty value disables them. |
+| `VOXER_SOUNDS_DIR` | Bundled `voxer/sounds/` | Directory of predefined soundboard MP3s; replace files using the same filenames. |
 | `VOXER_LOG_LEVEL` | `INFO` | Logging detail. |
+
+<h3 align="center">🔊 TTS commands and soundboard</h3>
+
+Anyone in chat can use these commands; no subscriber or moderator role is required.
+The existing bot-account filters, per-user cooldown, message length limits, and
+connected-overlay requirement still apply. Ordinary messages continue to use
+automatic TTS.
+
+| Chat message | Playback |
+| :--- | :--- |
+| `!tts Hello, chat!` | Speaks “Hello, chat!” using the chatter's current voice. |
+| `hey !tts message to TTS` | Speaks only “message to TTS”, with the usual username announcement when due. |
+| `!tts message !end !sound magic` | Speaks “message”, then plays `sparkle`. |
+| `!s pop !tts That was fun !end` | Plays `pop`, then speaks “That was fun”. |
+| `!tts first !end ignored text !tts second` | Speaks “first”, then “second”. |
+| `!S : "woof-woof"!` | Plays `wan wan`. |
+
+Commands can appear anywhere after whitespace, or at the start of a message.
+`!tts` reads until `!end`, the next supported command, or the end of the message.
+When a message contains supported commands, text before them and after `!end`
+is ignored. `!end` is optional before another command. Unknown sound names and
+empty command sections are skipped; later valid commands still run. Unknown
+markers inside speech, such as `!unknown`, remain part of the speech text.
+
+Both `!sound <name>` and `!s <name>` accept the names and aliases below. Matching
+ignores case, accepts extra whitespace and optional `:` / `=` after the command,
+and supports quoted sound names and trailing `.`, `!`, or `?`. Multiword sound
+names also accept hyphens, underscores, or no separator: `choo choo`,
+`choo-choo`, `choo_choo`, and `choochoo` all work. A sound argument must match
+the entire name or alias; use another command or `!end` before adding prose.
+
+| Sound | Aliases |
+| :--- | :--- |
+| `pop` | |
+| `zap` | `quezacotl` |
+| `sparkle` | `magic` |
+| `ding` | |
+| `crunch` | |
+| `chirp` | |
+| `choo choo` | |
+| `splash` | |
+| `tweet` | |
+| `boing` | |
+| `hush` | `shhh` |
+| `ribbit` | `croak` |
+| `doki doki` | |
+| `wan wan` | `goodboy`, `goodgirl`, `arf arf`, `bark bark`, `woof woof` |
+| `noted` | |
+| `bang` | |
+| `beep` | |
+| `wow` | `anime wow` |
+| `gong` | `asian gong` |
+| `aww` | |
+| `bruh` | |
+| `buzzer` | |
+| `chime` | `ding2` |
+| `call` | `discord call` |
+| `leave` | `discord leave` |
+| `discord` | `discord notification`, `discord ping` |
+| `join` | `discord join` |
+| `wrong` | `incorrect`, `loud buzzer` |
+| `fart` | |
+| `gunshot` | `shot` |
+| `iphone` | `iphone notification` |
+| `meow2` | `meow 2` |
+| `quack` | |
+| `meow` | `meow1`, `meow 1` |
+| `evil` | `evil laugh`, `muhehehe` |
+| `nana` | `na na na` |
+| `nope` | |
+| `hellnah` | `hell nah` |
+| `omg` | `oh my god` |
+| `ohno` | `oh no`, `oh no laugh` |
+| `punch` | |
+| `rizz` | |
+| `shocked` | `shock` |
+| `thunder` | |
+| `wait` | `wait wait`, `what the hell` |
+| `champions` | `we are the champions` |
+| `wetfart` | `wet fart` |
+| `whip` | |
+| `womp` | `womp womp`, `womp womp womp` |
+
+`doki doki` plays a heartbeat, `wan wan` plays barking, and `noted` plays a
+notification. All 49 clips are bundled for offline playback,
+including Docker and installed Python packages. See [sound sources and credits](voxer/sounds/README.md)
+for the original recordings and licenses.
+
+A chat message's commands share one cooldown check and enter the queue in order.
+If there is not enough queue space for the whole sequence, the sequence is
+dropped. Sound effects use the same playback queue and volume setting as speech.
+
+Emote-only messages automatically play a random notification from
+`VOXER_EMOTE_SOUND_PATHS` (by default, `emotes/slack-message.mp3` and
+`emotes/discord.mp3`) while displaying the resolved emotes. An empty setting
+disables these notifications. The `!s discord` command uses the clip in
+`voxer/sounds/discord.mp3`.
 
 <h3 align="center">💬 Scheduled messages</h3>
 
